@@ -1,66 +1,48 @@
-from fastapi import APIRouter, UploadFile, File
-from app.schemas.player import PlayerCreate, PlayerUpdate, PlayerResponse, PlayerBulkUploadResponse
+from fastapi import APIRouter, Depends
+from app.schemas.player import SalaryOverrideRequest, SalaryOverrideResponse
 from app.services import player_service
+from app.core.deps import get_optional_user, require_sport_director
+from app.models.user import User
 
-router = APIRouter(tags=["Squad Management"])
-
-
-@router.post(
-    "/clubs/{club_id}/players",
-    response_model=PlayerResponse,
-    status_code=201,
-    summary="Add player to squad",
-)
-async def create_player(club_id: str, body: PlayerCreate):
-    return await player_service.create_player(club_id, body)
+router = APIRouter(prefix="/players", tags=["Players"])
 
 
 @router.get(
-    "/clubs/{club_id}/players",
-    response_model=list[PlayerResponse],
-    summary="List all players in a club's squad",
-)
-async def list_players(club_id: str):
-    return await player_service.list_players(club_id)
-
-
-@router.post(
-    "/clubs/{club_id}/players/upload",
-    response_model=PlayerBulkUploadResponse,
-    summary="Bulk upload squad via CSV",
+    "/{api_football_id}",
+    summary="Get player by API-Football ID",
     description=(
-        "Upload a CSV file with columns: name, age, nationality, position, "
-        "annual_salary, contract_length_years, contract_expiry_year, "
-        "transfer_value, acquisition_fee (optional), acquisition_year (optional)"
+        "Use the `api_football_id` shown in the squad list (e.g. 984, 276).\n\n"
+        "Regular users see the Capology salary estimate. "
+        "Sport Directors / Admins also see their private salary override if one is set."
     ),
 )
-async def bulk_upload_players(club_id: str, file: UploadFile = File(...)):
-    return await player_service.bulk_upload_players(club_id, file)
+async def get_player(
+    api_football_id: int,
+    viewer: User | None = Depends(get_optional_user),
+):
+    return await player_service.get_player_by_api_id(api_football_id, viewer)
 
 
-# Individual player operations
-
-@router.get(
-    "/players/{player_id}",
-    response_model=PlayerResponse,
-    summary="Get player by ID",
+@router.put(
+    "/{api_football_id}/salary-override",
+    response_model=SalaryOverrideResponse,
+    summary="Set real salary — Sport Directors / Admins only",
+    description="Private. Never shown to regular users. Powers accurate FFP simulations.",
 )
-async def get_player(player_id: str):
-    return await player_service.get_player(player_id)
-
-
-@router.patch(
-    "/players/{player_id}",
-    response_model=PlayerResponse,
-    summary="Update player contract or valuation",
-)
-async def update_player(player_id: str, body: PlayerUpdate):
-    return await player_service.update_player(player_id, body)
+async def set_salary_override(
+    api_football_id: int,
+    body: SalaryOverrideRequest,
+    user: User = Depends(require_sport_director),
+):
+    return await player_service.set_salary_override_by_api_id(api_football_id, body, user)
 
 
 @router.delete(
-    "/players/{player_id}",
-    summary="Remove player from squad",
+    "/{api_football_id}/salary-override",
+    summary="Remove salary override — reverts to Capology estimate",
 )
-async def delete_player(player_id: str):
-    return await player_service.delete_player(player_id)
+async def delete_salary_override(
+    api_football_id: int,
+    user: User = Depends(require_sport_director),
+):
+    return await player_service.delete_salary_override_by_api_id(api_football_id, user)

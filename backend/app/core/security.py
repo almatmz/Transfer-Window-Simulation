@@ -1,56 +1,80 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from enum import Enum
 
 from fastapi import HTTPException, status
 from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 from app.core.config import settings
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 72  
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def create_access_token(
-    data: dict[str, Any],
-    expires_delta: timedelta | None = None,
-) -> str:
+
+class UserRole(str, Enum):
+    ANONYMOUS = "anonymous"
+    USER = "user"
+    SPORT_DIRECTOR = "sport_director"
+    ADMIN = "admin"
+
+
+# Role hierarchy — higher index = more permissions
+ROLE_HIERARCHY = [
+    UserRole.ANONYMOUS,
+    UserRole.USER,
+    UserRole.SPORT_DIRECTOR,
+    UserRole.ADMIN,
+]
+
+
+def role_gte(role: UserRole, minimum: UserRole) -> bool:
+    """Check if role meets or exceeds the minimum required role."""
+    return ROLE_HIERARCHY.index(role) >= ROLE_HIERARCHY.index(minimum)
+
+
+# ── Password ──────────────────────────────────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+
+# ── JWT ───────────────────────────────────────────────────────────────────────
+
+def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode["exp"] = expire
+    to_encode["type"] = "access"
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
-def decode_access_token(token: str) -> dict[str, Any]:
-    credentials_exception = HTTPException(
+def create_refresh_token(data: dict[str, Any]) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode["exp"] = expire
+    to_encode["type"] = "refresh"
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str, token_type: str = "access") -> dict[str, Any]:
+    exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail="Invalid or expired token",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("sub") is None:
-            raise credentials_exception
+            raise exc
+        if payload.get("type") != token_type:
+            raise exc
         return payload
     except JWTError:
-        raise credentials_exception
-
-
-#  FFP status helper  
-def get_ffp_status(wages: float, revenue: float) -> str:
-    """
-        "GREEN"  — ratio ≤ 70% (safe)
-        "YELLOW" — ratio 70–80% (warning)
-        "RED"    — ratio > 80% (high risk)
-    """
-    ratio = (wages / revenue) if revenue > 0 else 1.0
-    if ratio > 0.8:
-        return "RED"
-    if ratio > 0.7:
-        return "YELLOW"
-    return "GREEN"
-
-
-def calculate_amortization(fee: float, years: int) -> float:
-    """Calculates annual accounting cost of a player."""
-    return fee / years if years > 0 else 0
+        raise exc

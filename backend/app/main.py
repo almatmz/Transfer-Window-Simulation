@@ -9,7 +9,6 @@ from app.api.v1.router import api_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize DB on startup."""
     await init_db()
     yield
 
@@ -17,12 +16,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description=(
-        "Transfer Window Financial Simulator — "
-        "Helping sporting directors make FFP-compliant decisions. "
-        "Simulate incoming/outgoing transfers, calculate amortization, "
-        "and project 3-year FFP risk in real time."
-    ),
+    description="""
+**Transfer Window Financial Simulator**
+
+Simulate transfer windows with full FFP impact analysis.
+
+**Access levels:**
+-  **Anonymous / Public** — search clubs, view squads, view FFP dashboards (Capology estimates)
+-  **User** — + save transfer simulations, edit profile
+-  **Sport Director** — + set private real salaries, see accurate FFP calculations
+-  **Admin** — + manage users, force data syncs
+
+**Transfer types:** BUY · SELL · LOAN IN · LOAN OUT (with option-to-buy)
+    """,
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -36,15 +42,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/", tags=["Health"])
-async def health_check():
-    return {
-        "status": "ok",
-        "app": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "environment": settings.APP_ENV,
-    }
+async def health():
+    return {"status": "ok", "version": settings.APP_VERSION}

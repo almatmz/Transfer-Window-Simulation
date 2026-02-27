@@ -1,33 +1,71 @@
-from fastapi import APIRouter, Query
-from app.schemas.club import ClubCreate, ClubUpdate, ClubResponse
-from app.services import club_service
+from fastapi import APIRouter, Depends, Query
+from app.schemas.club import ClubResponse, ClubRevenueUpdate
+from app.schemas.player import PlayerPublicResponse, PlayerSDResponse
+from app.services import club_service, player_service
+from app.core.deps import get_optional_user, require_sport_director
+from app.models.user import User
 
 router = APIRouter(prefix="/clubs", tags=["Clubs"])
 
 
-@router.post("/", response_model=ClubResponse, status_code=201, summary="Create a new club")
-async def create_club(body: ClubCreate):
-    return await club_service.create_club(body)
+@router.get(
+    "/{api_football_id}",
+    response_model=ClubResponse,
+    summary="Get club profile — fetches and caches from API-Football if not yet loaded",
+)
+async def get_club(api_football_id: int, season: int = Query(2024)):
+    """No auth required. First call fetches from API-Football and syncs squad."""
+    return await club_service.get_or_sync_club(api_football_id, season)
 
 
-@router.get("/", response_model=list[ClubResponse], summary="List all clubs")
-async def list_clubs(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+@router.get(
+    "/{api_football_id}/squad",
+    summary="Get club squad — public data for all, salary overrides visible to Sport Directors",
+)
+async def get_squad(
+    api_football_id: int,
+    viewer: User | None = Depends(get_optional_user),
 ):
-    return await club_service.list_clubs(skip=skip, limit=limit)
+    """
+    Returns all squad players.
+    - Regular users / anonymous: Capology salary estimates
+    - Sport Directors / Admins: Override salaries shown if set
+    """
+    from app.models.club import Club
+    club = await Club.find_one(Club.api_football_id == api_football_id)
+    if not club:
+        # Trigger sync first
+        await club_service.get_or_sync_club(api_football_id)
+        club = await Club.find_one(Club.api_football_id == api_football_id)
+    return await player_service.list_squad(str(club.id), viewer)
 
 
-@router.get("/{club_id}", response_model=ClubResponse, summary="Get club by ID")
-async def get_club(club_id: str):
-    return await club_service.get_club(club_id)
+@router.patch(
+    "/{api_football_id}/revenue",
+    response_model=ClubResponse,
+    summary="Set club annual revenue — Sport Directors / Admins only",
+    description="Revenue is needed for FFP calculations. Only sport directors with club access can set this.",
+)
+async def update_revenue(
+    api_football_id: int,
+    body: ClubRevenueUpdate,
+    user: User = Depends(require_sport_director),
+):
+    return await club_service.update_club_revenue(api_football_id, body, str(user.id))
 
 
-@router.patch("/{club_id}", response_model=ClubResponse, summary="Update club financials")
-async def update_club(club_id: str, body: ClubUpdate):
-    return await club_service.update_club(club_id, body)
-
-
-@router.delete("/{club_id}", summary="Delete a club")
-async def delete_club(club_id: str):
-    return await club_service.delete_club(club_id)
+@router.post(
+    "/{api_football_id}/sync",
+    summary="Force re-sync club squad from API-Football — Sport Directors / Admins only",
+)
+async def force_sync(
+    api_football_id: int,
+    season: int = Query(2024),
+    user: User = Depends(require_sport_director),
+):
+    from app.models.club import Club
+    club = await Club.find_one(Club.api_football_id == api_football_id)
+    if not club:
+        raise ValueError("Club not found")
+    count = await club_service.sync_squad(club, season)
+    return {"message": f"Synced {count} players", "club": club.name}
