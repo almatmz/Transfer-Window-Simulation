@@ -1,14 +1,20 @@
+"""
+Club service — data comes from API-Football, cached in MongoDB.
+Salary data: Capology (primary) → position-based estimate (fallback) → 0 (last resort)
+"""
+
 from datetime import datetime
 from fastapi import HTTPException
 from app.models.club import Club
 from app.models.player import Player, Position
 from app.schemas.club import ClubResponse, ClubSearchResult, ClubRevenueUpdate
 from app.integrations.clients import api_football
-from app.integrations.scrapers.capology import get_club_salaries
+from app.integrations.scrapers.capology import (
+    get_club_salaries, estimate_salary_by_position
+)
 
 
 def _s(val) -> str:
-    """Safe string — None or missing becomes empty string."""
     return str(val) if val is not None else ""
 
 
@@ -27,7 +33,6 @@ def _serialize(club: Club) -> ClubResponse:
 
 
 async def search_clubs(query: str, country: str = "") -> list[ClubSearchResult]:
-    """Search clubs via API-Football /teams endpoint (free tier)."""
     results = await api_football.search_clubs(query, country)
     clubs = []
     for r in results:
@@ -38,25 +43,19 @@ async def search_clubs(query: str, country: str = "") -> list[ClubSearchResult]:
             api_football_id=api_id,
             name=_s(r.get("name")),
             short_name=_s(r.get("short_name")),
-            country=_s(r.get("country")),   
-            league="",                     
+            country=_s(r.get("country")),
+            league="",
             logo_url=_s(r.get("logo_url")),
         ))
     return clubs
 
 
 async def get_or_sync_club(api_football_id: int, season: int = 2024) -> ClubResponse:
-    """
-    Get club from MongoDB cache, or fetch from API-Football and cache it.
-    Also syncs the full squad on first load.
-    """
     club = await Club.find_one(Club.api_football_id == api_football_id)
-
     if not club:
         raw = await api_football.get_club_by_id(api_football_id)
         if not raw:
-            raise HTTPException(status_code=404, detail=f"Club {api_football_id} not found in API-Football")
-
+            raise HTTPException(status_code=404, detail=f"Club {api_football_id} not found")
         club = Club(
             api_football_id=api_football_id,
             name=_s(raw.get("name")),
@@ -69,20 +68,23 @@ async def get_or_sync_club(api_football_id: int, season: int = 2024) -> ClubResp
         )
         await club.insert()
         await sync_squad(club, season)
-
     return _serialize(club)
 
 
 async def sync_squad(club: Club, season: int = 2024) -> int:
     """
-    Fetch squad from API-Football, enrich with Capology salary estimates,
-    upsert into players collection. Returns count of players synced.
+    Fetch squad from API-Football.
+    Salary sources (in order):
+      1. Capology scrape
+      2. Position-based estimate (fallback — always provides a non-zero value)
     """
     squad_raw = await api_football.get_squad(club.api_football_id, season)
     if not squad_raw:
         return 0
 
-    salary_estimates = await get_club_salaries(club.name)
+    # Try Capology first
+    salary_map = await get_club_salaries(club.name, club.league)
+    capology_available = bool(salary_map)
 
     synced = 0
     for raw in squad_raw:
@@ -90,16 +92,33 @@ async def sync_squad(club: Club, season: int = 2024) -> int:
         if not api_id:
             continue
 
-        est_salary = salary_estimates.get(_s(raw.get("name")).lower(), 0.0)
+        name = _s(raw.get("name"))
+        position_str = _s(raw.get("position"))  # e.g. "GK", "CB", "CM"
+        position = _map_position(position_str)
+
+        # Salary resolution
+        if capology_available:
+            salary = salary_map.get(name.lower(), 0.0)
+            salary_source = "capology_estimate"
+        else:
+            salary = 0.0
+            salary_source = "capology_estimate"
+
+        # Fallback: position estimate if still 0
+        if salary == 0.0:
+            salary = estimate_salary_by_position(position_str, club.league)
+            salary_source = "position_estimate"
 
         existing = await Player.find_one(Player.api_football_id == api_id)
         if existing:
             await existing.set({
-                "name": _s(raw.get("name")),
+                "name": name,
                 "age": raw.get("age") or 0,
                 "photo_url": _s(raw.get("photo_url")),
-                "position": _map_position(_s(raw.get("position"))),
-                "estimated_annual_salary": est_salary or existing.estimated_annual_salary,
+                "position": position,
+                "club_id": str(club.id),
+                "estimated_annual_salary": salary,
+                "salary_source": salary_source,
                 "last_synced_at": datetime.utcnow(),
             })
         else:
@@ -107,12 +126,12 @@ async def sync_squad(club: Club, season: int = 2024) -> int:
                 api_football_id=api_id,
                 club_id=str(club.id),
                 api_football_club_id=club.api_football_id,
-                name=_s(raw.get("name")),
+                name=name,
                 age=raw.get("age") or 0,
                 photo_url=_s(raw.get("photo_url")),
-                position=_map_position(_s(raw.get("position"))),
-                estimated_annual_salary=est_salary,
-                salary_source="capology_estimate",
+                position=position,
+                estimated_annual_salary=salary,
+                salary_source=salary_source,
             )
             await player.insert()
         synced += 1
@@ -123,12 +142,11 @@ async def sync_squad(club: Club, season: int = 2024) -> int:
 async def update_club_revenue(
     api_football_id: int, data: ClubRevenueUpdate, user_id: str
 ) -> ClubResponse:
-    """Sport Directors / Admins only: set the club's revenue for FFP calculations."""
     club = await Club.find_one(Club.api_football_id == api_football_id)
     if not club:
         raise HTTPException(
             status_code=404,
-            detail="Club not found — search for it first via GET /api/v1/search/clubs"
+            detail="Club not loaded. Search for it first via GET /api/v1/search/clubs"
         )
     await club.set({
         "annual_revenue": data.annual_revenue,

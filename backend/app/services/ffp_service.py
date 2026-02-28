@@ -90,7 +90,18 @@ async def get_ffp_dashboard_by_api_id(
     )
 
     # Convert dataclass → dict for pydantic
-    proj_out = [p.__dict__ for p in projections]
+    from app.schemas.ffp import YearlyProjection as YP
+    proj_out = [YP(
+        year=p.year,
+        revenue=p.revenue,
+        wage_bill=p.wage_bill,
+        amortization=p.amortization,
+        squad_cost=p.squad_cost,
+        squad_cost_ratio=p.squad_cost_ratio,
+        net_transfer_spend=p.net_transfer_spend,
+        operating_result=p.operating_result,
+        ffp_status=p.ffp_status,
+    ) for p in projections]
 
     return FFPDashboardResponse(
         club_id=str(club.id),

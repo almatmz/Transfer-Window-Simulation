@@ -21,10 +21,11 @@ from app.schemas.transfer import (
     AddBuyRequest, AddSellRequest, AddLoanInRequest, AddLoanOutRequest,
 )
 from app.core.security import UserRole
-from app.schemas.transfer import YearlyProjection
 from app.utils.amortization import calculate_annual_amortization
 from app.utils.ffp_calculator import build_projections, worst_case_status
 
+
+# ── Serializers ───────────────────────────────────────────────────────────────
 
 def _serialize(sim: TransferSimulation) -> SimulationResponse:
     return SimulationResponse(
@@ -72,7 +73,7 @@ def _summary(sim: TransferSimulation) -> SimulationSummary:
     )
 
 
-# Helper: get player financials 
+# ── Helper: get player financials ─────────────────────────────────────────────
 
 async def _player_financials(
     api_football_player_id: int | None, is_sd: bool
@@ -90,7 +91,7 @@ async def _player_financials(
     return player.estimated_annual_salary, player.contract_length_years, 0.0
 
 
-#  Core FFP engine 
+# ── Core FFP engine ───────────────────────────────────────────────────────────
 
 async def _recompute(
     club: Club,
@@ -149,22 +150,30 @@ async def _recompute(
     total_amort = max(baseline_amort + buy_amort - sell_amort + loan_in_amort, 0)
     net_spend = buy_fees + loan_fees_paid - sell_fees - loan_fees_recv
 
-    revenue = max(club.annual_revenue or 1.0, 1.0)
+    base_revenue = club.annual_revenue or 0.0  # 0 = not set, ffp_calculator handles it
 
-    projections, ffp_result = build_projections(
-    base_revenue=revenue,
-    base_wage_bill=total_wages,
-    base_amortization=total_amort,
-    net_spend_year1=net_spend,
-    loan_fee_impact_year1=loan_fees_paid - loan_fees_recv,
-    projection_years=3,
-    start_year=club.season_year or 2025,
-)
-    
-    projections = [
-    YearlyProjection(**p.__dict__)
-    for p in projections
-]
+    projections, overall = build_projections(
+        base_revenue=base_revenue,
+        base_wage_bill=total_wages,
+        base_amortization=total_amort,
+        net_spend_year1=net_spend,
+        loan_fee_impact_year1=loan_fees_paid - loan_fees_recv,
+        projection_years=3,
+        start_year=club.season_year or 2025,
+    )
+    # Convert YearProjection dataclasses -> YearlyProjection pydantic models
+    from app.models.transfer import YearlyProjection as YP
+    proj_models = [YP(
+        year=p.year,
+        revenue=p.revenue,
+        wage_bill=p.wage_bill,
+        amortization=p.amortization,
+        squad_cost=p.squad_cost,
+        squad_cost_ratio=p.squad_cost_ratio,
+        net_transfer_spend=p.net_transfer_spend,
+        operating_result=p.operating_result,
+        ffp_status=p.ffp_status,
+    ) for p in projections]
 
     return {
         "used_salary_overrides": used_overrides,
@@ -173,8 +182,8 @@ async def _recompute(
         "total_loan_fees_paid": round(loan_fees_paid, 2),
         "total_loan_fees_received": round(loan_fees_recv, 2),
         "net_spend": round(net_spend, 2),
-        "projections": projections,
-        "overall_ffp_status": ffp_result.status,
+        "projections": proj_models,
+        "overall_ffp_status": overall.status,
     }
 
 

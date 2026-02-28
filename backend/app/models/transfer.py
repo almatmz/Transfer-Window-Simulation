@@ -13,15 +13,16 @@ class WindowType(str, Enum):
 class YearlyProjection(BaseModel):
     year: int
     revenue: float
-    total_wage_bill: float
-    amortization_cost: float
-    wage_to_revenue_ratio: float
+    wage_bill: float
+    amortization: float
+    squad_cost: float
+    squad_cost_ratio: float       # decimal e.g. 0.68 = 68%
     net_transfer_spend: float
-    loan_fee_impact: float = 0.0
+    operating_result: float
     ffp_status: str
 
 
-# Individual transfer entries ─
+# ─── Individual transfer entries ──────────────────────────────────────────────
 
 class BuyEntry(BaseModel):
     """Buy a player. Fee amortized over contract years. Full salary on wage bill."""
@@ -96,7 +97,7 @@ class LoanOutEntry(BaseModel):
     option_to_sell_year: int = Field(default=0, ge=0)
 
 
-#  Simulation document
+# ─── Simulation document ──────────────────────────────────────────────────────
 
 class TransferSimulation(Document):
     user_id: str
