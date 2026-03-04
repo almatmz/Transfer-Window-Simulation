@@ -1,90 +1,70 @@
 from pydantic import BaseModel, Field
-from typing import Optional
 from datetime import datetime
-from app.models.transfer import (
-    WindowType, BuyEntry, SellEntry, LoanInEntry, LoanOutEntry, YearlyProjection
-)
+from typing import Optional
+from app.models.transfer import TransferType, WindowType
 
 
-class SimulationCreateRequest(BaseModel):
-    club_api_football_id: int = Field(
-        ..., description="e.g. 33 = Man Utd, 541 = Real Madrid, 165 = Borussia Dortmund"
+class CreateSimulationRequest(BaseModel):
+    club_api_football_id: int
+    name: str = Field(..., min_length=1, max_length=100)
+    season_year: int = Field(default=2025, ge=2020, le=2040)
+    window_type: WindowType = WindowType.SUMMER
+
+
+class AddTransferRequest(BaseModel):
+    type: TransferType
+    player_name: str = Field(..., min_length=1)
+    position: str = "UNKNOWN"
+    age: int = Field(default=0, ge=0, le=50)
+    nationality: str = ""
+
+    # Common
+    transfer_fee: float = Field(default=0.0, ge=0)
+    annual_salary: float = Field(default=0.0, ge=0)
+    contract_length_years: int = Field(default=1, ge=1, le=10)
+
+    # Loan specific
+    loan_fee: float = Field(default=0.0, ge=0)
+    loan_fee_received: float = Field(default=0.0, ge=0)
+    loan_wage_contribution_pct: float = Field(
+        default=50.0, ge=0, le=100,
+        description="% of wages YOUR club pays. 50=split. 100=you pay all. 0=them pays all."
     )
-    simulation_name: str = Field(..., min_length=2, max_length=100, description='e.g. "Summer 2026 rebuild"')
-    window_type: WindowType = Field(default=WindowType.SUMMER)
-    season: str = Field(default="2025/26", description='e.g. "2025/26" or "2026/27"')
-    is_public: bool = False
+
+    # Option to buy
+    option_to_buy_enabled: bool = False
+    option_to_buy_fee: float = Field(default=0.0, ge=0)
+
+    # Optional: link to real squad player
+    player_api_football_id: Optional[int] = None
 
 
-class UpdateSimulationMetaRequest(BaseModel):
-    simulation_name: Optional[str] = None
-    window_type: Optional[WindowType] = None
-    season: Optional[str] = None
-    is_public: Optional[bool] = None
+class SimulationTransferResponse(BaseModel):
+    id: str
+    simulation_id: str
+    type: str
+    player_name: str
+    position: str
+    age: int
+    transfer_fee: float
+    annual_salary: float
+    contract_length_years: int
+    loan_fee: float
+    loan_fee_received: float
+    loan_wage_contribution_pct: float
+    option_to_buy_enabled: bool
+    option_to_buy_fee: float
+    created_at: datetime
 
-
-
-class AddBuyRequest(BuyEntry):
-    pass
-
-
-class AddSellRequest(SellEntry):
-    pass
-
-
-class AddLoanInRequest(LoanInEntry):
-    pass
-
-
-class AddLoanOutRequest(LoanOutEntry):
-    pass
-
-
-#  Responses
 
 class SimulationResponse(BaseModel):
     id: str
-    user_id: str
-    club_api_football_id: int
     club_name: str
-    simulation_name: str
-    window_type: WindowType
-    season: str
-
-    buys: list[BuyEntry]
-    sells: list[SellEntry]
-    loans_in: list[LoanInEntry]
-    loans_out: list[LoanOutEntry]
-
-    used_salary_overrides: bool
-    projections: list[YearlyProjection]
-
-    total_buy_fees: float
-    total_sell_fees: float
-    total_loan_fees_paid: float
-    total_loan_fees_received: float
-    net_spend: float
-    overall_ffp_status: str
+    club_api_football_id: int
+    name: str
+    season_year: int
+    window_type: str
+    transfers: list[SimulationTransferResponse] = []
     is_public: bool
     created_at: datetime
     updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class SimulationSummary(BaseModel):
-    """Quick listing — no transfer details, just headline numbers."""
-    id: str
-    club_name: str
-    club_api_football_id: int
-    simulation_name: str
-    window_type: WindowType
-    season: str
-    total_buys: int
-    total_sells: int
-    total_loans_in: int
-    total_loans_out: int
-    net_spend: float
-    overall_ffp_status: str
-    is_public: bool
-    created_at: datetime

@@ -1,61 +1,55 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
-from app.models.player import Position
 
 
-class PlayerPublicResponse(BaseModel):
-    """
-    Returned to all users (including anonymous).
-    Salary is the Capology public estimate — never the SD override.
-    """
+class ContractResponse(BaseModel):
     id: str
+    player_id: str
+    player_name: str
+    position: str
+    contract_type: str
+    contract_start_year: int
+    contract_expiry_year: int
+    annual_salary: float
+    acquisition_fee: float
+    amortization_per_year: float
+    remaining_book_value: float
+    loan_wage_contribution_pct: float
+    data_source: str
+    is_active: bool
+
+
+class SquadPlayerResponse(BaseModel):
+    player_id: str
     api_football_id: int
     name: str
     age: int
+    position: str
     nationality: str
-    position: Position
     photo_url: str
-    transfer_value: float
-    transfer_value_currency: str
-    estimated_annual_salary: float         
-    salary_source: str                      
     contract_expiry_year: int
-    last_synced_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class PlayerSDResponse(PlayerPublicResponse):
-    """
-    Returned ONLY to Sport Directors and Admins.
-    Adds the override salary if one exists.
-    """
-    override_annual_salary: Optional[float] = None    # SD's private value
-    override_contract_years: Optional[int] = None
-    override_acquisition_fee: Optional[float] = None
-    has_override: bool = False
+    has_contract: bool
+    # SD/Admin only — None for public users
+    annual_salary: Optional[float] = None
+    amortization_per_year: Optional[float] = None
+    data_source: Optional[str] = None
 
 
-class SalaryOverrideRequest(BaseModel):
-    """Sport Director sets the real salary for a player."""
-    annual_salary: float
-    contract_length_years: int
+class CreateContractRequest(BaseModel):
+    player_api_football_id: int
+    contract_start_year: int
     contract_expiry_year: int
-    acquisition_fee: float = 0.0
-    acquisition_year: int = 0
-    notes: str = ""
+    annual_salary: float = Field(..., gt=0)
+    acquisition_fee: float = Field(default=0.0, ge=0)
+    contract_type: str = "permanent"
+    parent_club_id: Optional[str] = None
+    loan_fee: float = 0.0
+    loan_wage_contribution_pct: float = 50.0
+    option_to_buy_enabled: bool = False
+    option_to_buy_fee: float = 0.0
 
 
-class SalaryOverrideResponse(BaseModel):
-    id: str
-    player_id: str
-    club_id: str
-    annual_salary: float
-    contract_length_years: int
-    contract_expiry_year: int
-    acquisition_fee: float
-    notes: str
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
+class ExtendContractRequest(BaseModel):
+    new_expiry_year: int = Field(..., ge=2025, le=2040)
+    new_annual_salary: float = Field(..., gt=0)

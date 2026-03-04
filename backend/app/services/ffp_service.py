@@ -1,192 +1,192 @@
 from fastapi import HTTPException
 from app.models.club import Club
-from app.models.player import Player
-from app.models.salary_override import SalaryOverride
-from app.models.transfer import TransferSimulation
+from app.models.player_contract import PlayerContract, ContractType
+from app.models.transfer import TransferSimulation, SimulationTransfer, TransferType
 from app.models.user import User
-from app.schemas.ffp import FFPDashboardResponse, FFPStatus, YearlyProjection as YP
-from app.utils.amortization import calculate_annual_amortization
-from app.utils.ffp_calculator import build_projections, squad_cost_ratio, ffp_status_from_ratio
+from app.utils.financial_engine import engine, ContractSnapshot, TransferDelta, SquadFinancials
+from app.utils.ffp_rules import SQUAD_COST_RATIO_LIMIT, SQUAD_COST_RATIO_WARNING, BREAK_EVEN_LIMIT, BREAK_EVEN_EQUITY_LIMIT
+from app.schemas.ffp import FFPDashboardResponse, YearlyProjection
 from app.core.security import UserRole
 
 
-async def get_ffp_dashboard_by_api_id(
+async def _get_club(api_football_id: int) -> Club:
+    club = await Club.find_one(Club.api_football_id == api_football_id)
+    if not club:
+        raise HTTPException(status_code=404, detail=f"Club {api_football_id} not loaded.")
+    if club.annual_revenue <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="Revenue not configured. Set it via PATCH /clubs/{id}/revenue before using the FFP dashboard."
+        )
+    return club
+
+
+async def _contracts_to_snapshots(
+    club_id: str,
+    viewer: User | None,
+) -> list[ContractSnapshot]:
+    """
+    Load active contracts for a club and convert to ContractSnapshot objects.
+    Sport Directors / Admins see all contracts.
+    Regular users see same data (salary is not hidden in snapshots — only SD overrides matter at endpoint level).
+    """
+    contracts = await PlayerContract.find(
+        PlayerContract.club_id == club_id,
+        PlayerContract.is_active == True,
+    ).to_list()
+
+    snapshots = []
+    for c in contracts:
+        is_loan = c.contract_type == ContractType.LOAN
+        contribution = c.loan_wage_contribution_pct if is_loan else 100.0
+        snapshots.append(ContractSnapshot(
+            player_name=c.player_name,
+            annual_salary=c.annual_salary,
+            acquisition_fee=c.acquisition_fee,
+            contract_start_year=c.contract_start_year,
+            contract_expiry_year=c.contract_expiry_year,
+            is_loan=is_loan,
+            loan_wage_contribution_pct=contribution,
+        ))
+    return snapshots
+
+
+async def _sim_to_deltas(
+    sim: TransferSimulation,
+    club_id: str,
+    current_season: int,
+) -> list[TransferDelta]:
+    """Convert simulation transfer entries into FinancialEngine TransferDelta objects."""
+    entries = await SimulationTransfer.find(
+        SimulationTransfer.simulation_id == str(sim.id)
+    ).to_list()
+
+    deltas = []
+    for t in entries:
+        d = TransferDelta()
+
+        if t.type == TransferType.BUY:
+            d.added_wage = t.annual_salary
+            d.added_amortization = engine.amortization_for_buy(t.transfer_fee, t.contract_length_years)
+            d.added_transfer_fee = t.transfer_fee
+
+        elif t.type == TransferType.SELL:
+            # Find existing contract to get actual salary + book value
+            contract = None
+            if t.player_id:
+                contract = await PlayerContract.find_one(
+                    PlayerContract.player_id == t.player_id,
+                    PlayerContract.club_id == club_id,
+                    PlayerContract.is_active == True,
+                )
+            if contract:
+                d.removed_wage = contract.annual_salary
+                d.removed_amortization = contract.amortization_per_year
+                d.sell_book_value = contract.get_remaining_book_value(current_season)
+            else:
+                d.removed_wage = t.annual_salary
+            d.sell_fee_received = t.transfer_fee
+            d.sell_profit_loss = t.transfer_fee - d.sell_book_value
+
+        elif t.type == TransferType.LOAN_IN:
+            d.loan_in_wage = engine.loan_in_wage_cost(t.annual_salary, t.loan_wage_contribution_pct)
+            d.loan_in_fee = t.loan_fee
+
+        elif t.type == TransferType.LOAN_OUT:
+            d.loan_out_wage_relief = engine.loan_out_wage_relief(t.annual_salary, t.loan_wage_contribution_pct)
+            d.loan_out_fee_received = t.loan_fee_received
+
+        deltas.append(d)
+    return deltas
+
+
+async def get_ffp_dashboard(
     api_football_id: int,
     viewer: User | None,
     sim_id: str | None = None,
 ) -> FFPDashboardResponse:
-    club = await Club.find_one(Club.api_football_id == api_football_id)
-    if not club:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Club {api_football_id} not loaded. Call GET /clubs/{api_football_id} first."
-        )
+    club = await _get_club(api_football_id)
+    club_id = str(club.id)
+    current_season = club.season_year
 
-    players = await Player.find(Player.club_id == str(club.id)).to_list()
-    is_sd = viewer and viewer.role in (UserRole.SPORT_DIRECTOR, UserRole.ADMIN)
+    snapshots = await _contracts_to_snapshots(club_id, viewer)
 
-    # ── Baseline squad wages + amortization ──────────────────────────────────
-    baseline_wages = 0.0
-    baseline_amort = 0.0
-    sources_used: set[str] = set()
-
-    for player in players:
-        if is_sd:
-            override = await SalaryOverride.find_one(SalaryOverride.player_id == str(player.id))
-            if override:
-                baseline_wages += override.annual_salary
-                baseline_amort += calculate_annual_amortization(
-                    override.acquisition_fee, override.contract_length_years
-                )
-                sources_used.add("sd_overrides")
-                continue
-        baseline_wages += player.estimated_annual_salary
-        sources_used.add("gemini_estimates")
-
-    # ── Overlay simulation if sim_id provided ─────────────────────────────────
+    # Simulation overlay
     sim = None
-    sim_label = ""
-    net_spend = 0.0
-    loan_fee_impact = 0.0
-    extra_wages = 0.0
-    extra_amort = 0.0
-    sell_wages  = 0.0
-    sell_amort  = 0.0
-
+    deltas = None
     if sim_id:
         from beanie import PydanticObjectId
         try:
             sim = await TransferSimulation.get(PydanticObjectId(sim_id))
         except Exception:
-            raise HTTPException(status_code=404, detail=f"Simulation {sim_id} not found")
-
+            raise HTTPException(status_code=404, detail=f"Simulation {sim_id} not found.")
         if sim.club_api_football_id != api_football_id:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Simulation {sim_id} belongs to club {sim.club_api_football_id}, not {api_football_id}"
-            )
+            raise HTTPException(status_code=400, detail="Simulation belongs to a different club.")
+        deltas = await _sim_to_deltas(sim, club_id, current_season)
 
-        sim_label = f" + sim '{sim.simulation_name}'"
-
-        # Add buys
-        for b in sim.buys:
-            extra_wages += b.annual_salary
-            extra_amort += calculate_annual_amortization(b.transfer_fee, b.contract_length_years)
-            net_spend   += b.transfer_fee
-
-        # Remove sells
-        for s in sim.sells:
-            # Try to find this player in squad for their actual salary
-            sell_player = None
-            if s.api_football_player_id:
-                sell_player = next(
-                    (p for p in players if p.api_football_id == s.api_football_player_id), None
-                )
-            if sell_player:
-                sell_wages += sell_player.estimated_annual_salary
-                sell_amort += calculate_annual_amortization(
-                    sell_player.transfer_value or 0, 1
-                )
-            else:
-                sell_wages += s.annual_salary
-            net_spend -= s.transfer_fee
-
-        # Loans in
-        for li in sim.loans_in:
-            pct = (li.wage_contribution_pct or 100) / 100
-            extra_wages  += li.annual_salary * pct
-            loan_fee_impact += getattr(li, "loan_fee", 0)
-
-        # Loans out
-        for lo in sim.loans_out:
-            pct = (lo.wage_contribution_pct or 0) / 100
-            # Relief = salary * (1 - your_contribution_pct)
-            sell_wages += lo.annual_salary * (1 - pct)
-            loan_fee_impact -= getattr(lo, "loan_fee", 0)
-
-    total_wages = max(baseline_wages + extra_wages - sell_wages, 0)
-    total_amort = max(baseline_amort + extra_amort - sell_amort, 0)
-
-    salary_data_source = (
-        "mixed" if len(sources_used) == 2
-        else "sd_overrides" if "sd_overrides" in sources_used
-        else "gemini_estimates"
+    # Calculate
+    fin: SquadFinancials = engine.calculate_squad_financials(
+        contracts=snapshots,
+        revenue=club.annual_revenue,
+        current_season=current_season,
+        transfer_deltas=deltas,
     )
 
-    base_revenue = club.annual_revenue or 0.0
-    revenue_configured = base_revenue > 0
-
-    # ── Current snapshot ──────────────────────────────────────────────────────
-    current_ratio      = squad_cost_ratio(base_revenue, total_wages, total_amort)
-    current_squad_cost = total_wages + total_amort
-    current_status_str = ffp_status_from_ratio(current_ratio)
-
-    if not revenue_configured:
-        reason = "⚠️ Revenue not set. Use PATCH /clubs/{id}/revenue for accurate FFP."
-        current_status_str = "HIGH_RISK"
-    elif current_status_str == "HIGH_RISK":
-        reason = f"Squad cost {current_ratio:.1%} exceeds UEFA 70% limit"
-    elif current_status_str == "WARNING":
-        reason = f"Squad cost ratio {current_ratio:.1%} approaching 70% limit — monitor closely"
-    else:
-        reason = f"Squad cost ratio {current_ratio:.1%} — within UEFA 70% limit ✅"
-
-    if sim:
-        reason += f" (simulation: '{sim.simulation_name}' applied)"
-
-    badges = {"SAFE": "✅", "WARNING": "⚠️", "HIGH_RISK": "🚨"}
-    colors = {"SAFE": "green", "WARNING": "amber", "HIGH_RISK": "red"}
-
-    current_ffp = FFPStatus(
-        status=current_status_str,
-        color=colors[current_status_str],
-        badge=badges[current_status_str],
-        reason=reason,
-        squad_cost_ratio=round(current_ratio, 4),
-        break_even_result=0.0,
-        break_even_ok=True,
+    # Projections
+    proj_raw = engine.build_projections(
+        contracts=snapshots,
+        revenue=club.annual_revenue,
+        current_season=current_season,
+        transfer_deltas=deltas,
+        years=3,
     )
-
-    # ── 3-year projections ────────────────────────────────────────────────────
-    projections, _ = build_projections(
-        base_revenue=base_revenue,
-        base_wage_bill=total_wages,
-        base_amortization=total_amort,
-        net_spend_year1=net_spend,
-        loan_fee_impact_year1=loan_fee_impact,
-        projection_years=3,
-        start_year=club.season_year or 2025,
-    )
-
-    proj_out = [YP(
-        year=p.year,
-        revenue=p.revenue,
-        wage_bill=p.wage_bill,
-        amortization=p.amortization,
-        squad_cost=p.squad_cost,
-        squad_cost_ratio=p.squad_cost_ratio,
-        net_transfer_spend=p.net_transfer_spend,
-        operating_result=p.operating_result,
-        ffp_status=p.ffp_status,
-    ) for p in projections]
+    projections = [
+        YearlyProjection(
+            year=p.year,
+            revenue=p.revenue,
+            wage_bill=p.wage_bill,
+            amortization=p.amortization,
+            squad_cost=p.squad_cost,
+            squad_cost_ratio=p.squad_cost_ratio,
+            net_transfer_spend=p.net_transfer_spend,
+            operating_result=p.operating_result,
+            ffp_status=p.ffp_status,
+            squad_cost_status=p.squad_cost_status,
+        )
+        for p in proj_raw
+    ]
 
     return FFPDashboardResponse(
-        club_id=str(club.id),
-        club_name=club.name + sim_label,
-        annual_revenue=base_revenue,
-        season_year=club.season_year or 2025,
-        salary_data_source=salary_data_source,
-        current_wage_bill=round(total_wages, 0),
-        current_amortization=round(total_amort, 0),
-        current_squad_cost=round(current_squad_cost, 0),
-        current_squad_cost_ratio=round(current_ratio, 4),
-        current_ffp_status=current_ffp,
-        projections=proj_out,
-        revenue_configured=revenue_configured,
+        club_id=club_id,
+        club_name=club.name,
+        annual_revenue=club.annual_revenue,
+        season_year=current_season,
+        contract_count=len(snapshots),
+
+        wage_bill=fin.wage_bill,
+        total_amortization=fin.total_amortization,
+        squad_cost=fin.squad_cost,
+        squad_cost_ratio=fin.squad_cost_ratio,
+
+        squad_cost_status=fin.ffp_status.squad_cost_status,
+        break_even_result=fin.break_even_result,
+        break_even_status=fin.ffp_status.break_even_status,
+        overall_status=fin.ffp_status.overall_status,
+
+        squad_cost_ratio_pct=fin.ffp_status.squad_cost_ratio_pct,
+        break_even_label=fin.ffp_status.break_even_eur_label,
+
+        projections=projections,
+
+        squad_cost_ratio_limit=SQUAD_COST_RATIO_LIMIT,
+        squad_cost_ratio_warning=SQUAD_COST_RATIO_WARNING,
+        break_even_limit_eur=BREAK_EVEN_LIMIT,
+        break_even_equity_limit_eur=BREAK_EVEN_EQUITY_LIMIT,
+
         simulation_id=sim_id,
-        simulation_name=sim.simulation_name if sim else None,
-        baseline_wage_bill=round(baseline_wages, 0),
-        simulation_extra_wages=round(extra_wages, 0),
-        simulation_wage_relief=round(sell_wages, 0),
-        simulation_net_spend=round(net_spend, 0),
+        simulation_name=sim.name if sim else None,
+        sim_added_wages=fin.sim_added_wages if sim else None,
+        sim_added_amortization=fin.sim_added_amortization if sim else None,
+        sim_removed_wages=fin.sim_removed_wages if sim else None,
+        sim_net_spend=fin.sim_net_spend if sim else None,
     )

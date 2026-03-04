@@ -19,7 +19,6 @@ class UserRole(str, Enum):
     ADMIN = "admin"
 
 
-# Role hierarchy — higher index = more permissions
 ROLE_HIERARCHY = [
     UserRole.ANONYMOUS,
     UserRole.USER,
@@ -33,7 +32,7 @@ def role_gte(role: UserRole, minimum: UserRole) -> bool:
     return ROLE_HIERARCHY.index(role) >= ROLE_HIERARCHY.index(minimum)
 
 
-# ── Password ──────────────────────────────────────────────────────────────────
+# Password 
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -43,7 +42,7 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-# ── JWT ───────────────────────────────────────────────────────────────────────
+#  JWT 
 
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()

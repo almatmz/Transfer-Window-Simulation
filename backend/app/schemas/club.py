@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
 
@@ -7,26 +7,24 @@ class ClubResponse(BaseModel):
     id: str
     api_football_id: int
     name: str
-    short_name: str
     country: str
     league: str
     logo_url: str
+    annual_revenue: float
+    equity_injection_limit: float
     season_year: int
+    revenue_configured: bool
     last_synced_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class ClubSearchResult(BaseModel):
-    """Lightweight result for search listings."""
-    api_football_id: int
-    name: str
-    country: str
-    league: str
-    logo_url: str
 
 
 class ClubRevenueUpdate(BaseModel):
-    """Sport Directors / Admins can set the club's annual revenue for FFP calculations."""
-    annual_revenue: float
-    season_year: int
+    annual_revenue: float = Field(..., gt=0, description="Annual revenue in EUR, must be > 0")
+    equity_injection_limit: Optional[float] = Field(None, ge=0, description="UEFA equity limit, default 60M")
+    season_year: Optional[int] = Field(None, ge=2020, le=2040)
+
+
+class ClubSearchResult(BaseModel):
+    api_football_id: int
+    name: str
+    country: str
+    logo_url: str
