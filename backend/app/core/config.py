@@ -16,10 +16,7 @@ class Settings(BaseSettings):
 
     SECRET_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 30
-
-    ADMIN_EMAIL: str = ""
-    ADMIN_PASSWORD: str = ""
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # API-Football
     API_FOOTBALL_KEY: str = ""

@@ -173,7 +173,7 @@ class FinancialEngine:
         if revenue <= 0:
             raise ValueError("Revenue must be > 0 to calculate FFP metrics.")
 
-        # ── Baseline from real contracts ──────────────────────────────────────
+        # Baseline from real contracts 
         permanent_wages = 0.0
         loan_in_wages   = 0.0
         loan_out_relief = 0.0
@@ -197,7 +197,7 @@ class FinancialEngine:
         sim_added_amort = 0.0
         sim_removed_wages = 0.0
 
-        # ── Simulation overlay ────────────────────────────────────────────────
+        # Simulation overlay 
         if transfer_deltas:
             for d in transfer_deltas:
                 wage_bill   += d.added_wage - d.removed_wage

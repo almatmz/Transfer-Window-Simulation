@@ -1,3 +1,6 @@
+"""
+Transfer simulation service — unified entry management.
+"""
 import logging
 from datetime import datetime
 from fastapi import HTTPException
@@ -136,3 +139,16 @@ async def delete_simulation(sim_id: str, user_id: str) -> None:
     # Delete all transfers first
     await SimulationTransfer.find(SimulationTransfer.simulation_id == sim_id).delete()
     await sim.delete()
+
+
+async def list_user_simulations(user_id: str) -> list[TransferSimulation]:
+    """Get all simulations belonging to a user."""
+    return await TransferSimulation.find(
+        TransferSimulation.user_id == user_id
+    ).sort(-TransferSimulation.updated_at).to_list()
+
+
+async def list_user_simulations(user_id: str) -> list[TransferSimulation]:
+    return await TransferSimulation.find(
+        TransferSimulation.user_id == user_id
+    ).sort(-TransferSimulation.updated_at).to_list()
