@@ -1,35 +1,47 @@
-'use client'
-import { useAuthStore } from '@/store/auth'
-import { Badge } from '@/components/ui/badge'
-import { Bell } from 'lucide-react'
-import Link from 'next/link'
+"use client";
+import { useAuthStore } from "@/store/auth";
+import { Badge } from "@/components/ui/badge";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
+import Link from "next/link";
 
-const roleBadge: Record<string, 'info' | 'success' | 'warning'> = {
-  admin: 'warning', sport_director: 'success', user: 'info',
-}
+const roleBadge: Record<string, "info" | "success" | "warning"> = {
+  admin: "warning",
+  sport_director: "success",
+  user: "info",
+};
 
 export function Topbar({ title }: { title?: string }) {
-  const { user } = useAuthStore()
+  const { user } = useAuthStore();
   return (
-    <header className="h-14 border-b border-slate-800/60 bg-slate-950/80 backdrop-blur-xl flex items-center justify-between px-6 sticky top-0 z-20 lg:ml-64">
-      <h1 className="text-sm font-semibold text-slate-300 pl-10 lg:pl-0">{title}</h1>
-      <div className="flex items-center gap-3">
-        <button className="p-1.5 rounded-lg text-slate-600 hover:text-slate-300 hover:bg-slate-800 transition-all">
-          <Bell className="w-4 h-4" />
-        </button>
+    <header
+      className="h-14 flex items-center justify-between px-5 sticky top-0 z-20"
+      style={{
+        background: "var(--c-surface)",
+        borderBottom: "1px solid var(--c-border)",
+      }}
+    >
+      <h1 className="text-base font-semibold c-text pl-12 lg:pl-0">{title}</h1>
+      <div className="flex items-center gap-2">
+        <ThemeToggle />
         {user && (
           <Link href="/profile">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl hover:bg-slate-800 transition-all cursor-pointer">
-              <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white">
+            <div
+              className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl cursor-pointer transition-all hover:opacity-80"
+              style={{ background: "var(--c-bg-raised)" }}
+            >
+              <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0">
                 {(user.full_name || user.username)[0]?.toUpperCase()}
               </div>
-              <Badge variant={roleBadge[user.role] || 'info'} className="hidden sm:flex">
-                {user.role.replace('_', ' ')}
+              <Badge
+                variant={roleBadge[user.role] || "info"}
+                className="hidden sm:flex text-[10px]"
+              >
+                {user.role.replace("_", " ")}
               </Badge>
             </div>
           </Link>
         )}
       </div>
     </header>
-  )
+  );
 }

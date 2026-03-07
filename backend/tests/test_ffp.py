@@ -3,10 +3,8 @@ from app.utils.ffp_calculator import evaluate_ffp_status, build_yearly_projectio
 from app.utils.amortization import calculate_annual_amortization, amortization_schedule
 
 
-# ── Amortization Tests ────────────────────────────────────────────────────────
 
 def test_amortization_basic():
-    # €60M over 4 years = €15M/year
     assert calculate_annual_amortization(60_000_000, 4) == 15_000_000.0
 
 
@@ -19,10 +17,8 @@ def test_amortization_schedule_sums_to_fee():
     years = 5
     schedule = amortization_schedule(fee, years, 2024)
     total = sum(s["charge"] for s in schedule)
-    assert abs(total - fee) < 1  # within €1 rounding
+    assert abs(total - fee) < 1  
 
-
-# ── FFP Status Tests ──────────────────────────────────────────────────────────
 
 def test_ffp_safe():
     status = evaluate_ffp_status(0.55, 30_000_000)
@@ -43,11 +39,9 @@ def test_ffp_high_risk_wage():
 
 
 def test_ffp_high_risk_spend():
-    status = evaluate_ffp_status(0.60, 100_000_000)  # over €90M ceiling
+    status = evaluate_ffp_status(0.60, 100_000_000)  
     assert status.status == "HIGH_RISK"
 
-
-# ── Projection Tests ──────────────────────────────────────────────────────────
 
 def test_projections_length():
     projections = build_yearly_projections(

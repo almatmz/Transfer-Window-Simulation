@@ -77,7 +77,6 @@ def test_net_spend_sell_heavy():
     assert net == -60_000_000
 
 
-# ── Wage Impact on FFP ────────────────────────────────────────────────────────
 
 def test_wage_increase_pushes_into_warning():
     """
