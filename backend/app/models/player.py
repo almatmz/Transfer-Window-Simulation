@@ -1,6 +1,6 @@
 from beanie import Document
 from pydantic import Field
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional
 from enum import Enum
 
@@ -33,19 +33,29 @@ class Player(Document):
     position: Position = Position.UNKNOWN
     photo_url: str = ""
 
-
-    transfer_value: float = 0.0
+    transfer_value: float = 0.0                  # current market value (€)
     transfer_value_currency: str = "EUR"
     transfer_value_updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    estimated_annual_salary: float = 0.0
-    salary_source: str = "capology_estimate"   
-
+    # Transfer fee paid when club acquired this player (for amortization)
+    acquisition_fee: float = 0.0
+    acquisition_year: int = 0                    # calendar year of signing
+    contract_signing_date: Optional[date] = None # exact signing date
     contract_expiry_year: int = 0
-    contract_length_years: int = 0
+    contract_length_years: int = 0               # total length at signing
+
+    estimated_annual_salary: float = 0.0
+    # capology_estimate | position_estimate | groq_estimate | sd_override
+    salary_source: str = "position_estimate"
+
+    # When a player is sold, we mark them sold so amortization stops and
+    # book profit/loss is calculated for that season.
+    is_sold: bool = False
+    sold_for: float = 0.0                        # transfer fee received
+    sold_in_year: int = 0                        # calendar year of sale
 
     last_synced_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Settings:
         name = "players"
-        indexes = ["api_football_id", "club_id"]
+        indexes = ["api_football_id", "club_id", "is_sold"]

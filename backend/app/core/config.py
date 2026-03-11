@@ -1,7 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator, AnyHttpUrl
+from pydantic import field_validator
 from functools import lru_cache
-from typing import Union
 
 
 class Settings(BaseSettings):
@@ -32,8 +31,6 @@ class Settings(BaseSettings):
 
     # External APIs
     API_FOOTBALL_KEY: str = ""
-    # "direct"   → key from dashboard.api-football.com  → x-apisports-key header
-    # "rapidapi" → key from rapidapi.com                → x-rapidapi-key header
     API_FOOTBALL_KEY_TYPE: str = "direct"
     API_FOOTBALL_BASE_URL: str = "https://v3.football.api-sports.io"
     API_FOOTBALL_DAILY_LIMIT: int = 100
@@ -45,9 +42,15 @@ class Settings(BaseSettings):
     # Cache
     REDIS_URL: str = ""
 
-    # CORS — stored as plain string in .env, parsed here
-    # .env value:  ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+    # CORS
     ALLOWED_ORIGINS: str = "http://localhost:3000"
+
+    # Groq AI
+    GROQ_API_KEY: str = ""
+
+    # Simulation constraints
+    # Users cannot simulate more than this many years into the future
+    MAX_SIMULATION_FUTURE_YEARS: int = 3
 
     @field_validator("SECRET_KEY")
     @classmethod
@@ -61,7 +64,6 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins_list(self) -> list[str]:
-        """Parse comma-separated ALLOWED_ORIGINS into a list."""
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
 
     @property
@@ -77,17 +79,17 @@ class Settings(BaseSettings):
         return bool(self.API_FOOTBALL_KEY)
 
     @property
+    def has_groq(self) -> bool:
+        return bool(self.GROQ_API_KEY)
+
+    @property
     def api_football_headers(self) -> dict:
-        """Returns the correct auth headers based on key type."""
         if self.API_FOOTBALL_KEY_TYPE == "rapidapi":
             return {
                 "x-rapidapi-key": self.API_FOOTBALL_KEY,
                 "x-rapidapi-host": "v3.football.api-sports.io",
             }
-        # Default: direct api-sports.io key
-        return {
-            "x-apisports-key": self.API_FOOTBALL_KEY,
-        }
+        return {"x-apisports-key": self.API_FOOTBALL_KEY}
 
 
 @lru_cache

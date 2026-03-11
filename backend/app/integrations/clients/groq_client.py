@@ -239,3 +239,48 @@ def find_in_enrichment(name: str, enrichment_map: dict) -> Optional[dict]:
                 return val
 
     return None
+
+
+_PLAYER_PROMPT = """\
+You are a football finance assistant. Extract financial data for this player.
+Return ONLY valid JSON, no explanation:
+{{
+  "annual_salary_eur": <number or null>,
+  "contract_expiry_year": <integer or null>,
+  "contract_length_years": <integer or null>,
+  "contract_signing_date": "<YYYY-MM-DD or null>",
+  "transfer_fee_eur": <number or null>,
+  "transfer_value_eur": <number or null>,
+  "nationality": "<string or null>"
+}}
+Rules: annual_salary_eur is gross annual (not weekly). All amounts in EUR.
+Player: {name}, Club: {club}, League: {league}, Position: {position}, Age: {age}
+"""
+
+
+async def extract_player_financials(
+    name: str,
+    club: str,
+    league: str,
+    position: str,
+    age: int,
+) -> dict | None:
+    """
+    Extract player salary/contract/transfer data via Groq (→ Gemini fallback).
+    Returns dict or None on failure.
+    """
+    cache_key = f"player_financials:{name.lower()}:{club.lower()}"
+    cached = await get_cache(cache_key)
+    if cached:
+        return cached
+
+    prompt = _PLAYER_PROMPT.format(
+        name=name, club=club, league=league, position=position, age=age
+    )
+    raw = await _call_ai(prompt)
+    result = _extract_json(raw) if raw else None
+
+    if result:
+        await set_cache(cache_key, result, ttl_seconds=CACHE_TTL)
+
+    return result
