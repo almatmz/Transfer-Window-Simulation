@@ -6,7 +6,8 @@ from app.models.player import Position
 
 class PlayerPublicResponse(BaseModel):
     """
-    Returned to all authenticated users (and anonymous viewers of public squads).
+    Served to ALL viewers including unauthenticated guests.
+    If an Admin override exists, its values replace the raw DB values here.
     """
     id: str
     api_football_id: int
@@ -35,80 +36,142 @@ class PlayerPublicResponse(BaseModel):
 
     transfermarkt_url: Optional[str] = None
 
+    # Indicates which layer of data the viewer is seeing
+    data_source: str = "db"   # "db" | "admin_override" | "sd_override"
+
     last_synced_at: datetime
 
     model_config = {"from_attributes": True}
 
 
+# SD / Admin response — adds override metadata + financial details
+
 class PlayerSDResponse(PlayerPublicResponse):
     """
     Returned ONLY to Sport Directors and Admins.
-    Adds override salary, full contract details, and loan financial details.
-    """
-    # ── Salary / contract override fields
-    override_annual_salary: Optional[float] = None
-    override_contract_years: Optional[int] = None
-    override_contract_expiry_year: Optional[int] = None
-    override_acquisition_fee: Optional[float] = None
-    override_acquisition_year: Optional[int] = None
-    override_contract_signing_date: Optional[date] = None
-    has_override: bool = False
 
-    # ── Computed amortization (uses override if set, else player data)
+    The base fields (name, salary, contract, etc.) already reflect the
+    merged priority view:
+      SD's own override > Admin override > raw DB
+
+    The override_* fields expose what each layer has set, so the SD
+    can see exactly what is overriding what.
+    """
+
+    admin_override_id: Optional[str] = None
+    admin_annual_salary: Optional[float] = None
+    admin_contract_expiry_year: Optional[int] = None
+    admin_contract_length_years: Optional[int] = None
+    admin_transfer_value: Optional[float] = None
+    admin_is_on_loan: Optional[bool] = None
+    admin_notes: Optional[str] = None
+    has_admin_override: bool = False
+
+    sd_override_id: Optional[str] = None
+    sd_annual_salary: Optional[float] = None
+    sd_contract_expiry_year: Optional[int] = None
+    sd_contract_length_years: Optional[int] = None
+    sd_transfer_value: Optional[float] = None
+    sd_is_on_loan: Optional[bool] = None
+    sd_notes: Optional[str] = None
+    has_sd_override: bool = False
+
+    #  Computed amortization (from the merged view values above) 
     annual_amortization: Optional[float] = None
     remaining_book_value: Optional[float] = None
     seasons_elapsed: Optional[int] = None
 
-    # ── Loan financial details (SD-only)
+    # ── SD-only loan financial details 
     loan_fee: Optional[float] = None
     loan_from_club_id: Optional[str] = None
     loan_start_date: Optional[date] = None
-    loan_wage_contribution_pct: Optional[float] = None  # from SalaryOverride if set
-
-    # ── Loan overrides (SD can correct Transfermarkt data)
-    override_is_on_loan: Optional[bool] = None
-    override_loan_from_club: Optional[str] = None
-    override_loan_end_date: Optional[date] = None
+    loan_wage_contribution_pct: Optional[float] = None
 
 
-class SalaryOverrideRequest(BaseModel):
-    """Sport Director / Admin sets the real salary and contract details for a player."""
-    annual_salary: float = Field(..., gt=0)
-    contract_length_years: int = Field(..., ge=1, le=10)
-    contract_expiry_year: int = Field(..., ge=2020, le=2040)
+
+class PlayerOverrideRequest(BaseModel):
+    """
+    Admin or Sport Director overrides any subset of player fields.
+
+    - Send only the fields you want to change.
+    - Fields left out (or set to null) are NOT overridden — the next
+      priority level's value will be used instead.
+    - Admin overrides are visible to everyone.
+    - SD overrides are visible only to that SD.
+    """
+    # Bio
+    name: Optional[str] = None
+    full_name: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    age: Optional[int] = Field(default=None, ge=0, le=60)
+    nationality: Optional[str] = None
+    position: Optional[str] = None   # use Position enum values: GK, CB, LB, etc.
+    photo_url: Optional[str] = None
+
+    # Financial
+    transfer_value: Optional[float] = Field(default=None, ge=0)
+    annual_salary: Optional[float] = Field(default=None, ge=0)
+
+    # Contract
     contract_signing_date: Optional[date] = None
-    acquisition_fee: float = Field(default=0.0, ge=0)
-    acquisition_year: int = Field(default=0, ge=0)
+    contract_expiry_date: Optional[date] = None
+    contract_expiry_year: Optional[int] = Field(default=None, ge=2020, le=2045)
+    contract_length_years: Optional[int] = Field(default=None, ge=1, le=10)
+    acquisition_fee: Optional[float] = Field(default=None, ge=0)
+    acquisition_year: Optional[int] = Field(default=None, ge=2000, le=2045)
+
+    # Loan
+    is_on_loan: Optional[bool] = None
+    loan_from_club: Optional[str] = None
+    loan_end_date: Optional[date] = None
+    loan_fee: Optional[float] = Field(default=None, ge=0)
+    loan_wage_contribution_pct: Optional[float] = Field(default=None, ge=0, le=100)
+
+    # Transfermarkt
+    transfermarkt_url: Optional[str] = None
+
     notes: str = ""
 
-    # ── Loan override fields (optional)
-    is_on_loan: bool = False
-    loan_from_club: Optional[str] = None
-    loan_end_date: Optional[date] = None
-    loan_fee_paid: float = 0.0
-    loan_wage_contribution_pct: float = 100.0
 
-
-class SalaryOverrideResponse(BaseModel):
+# Override response
+class PlayerOverrideResponse(BaseModel):
     id: str
     player_id: str
+    player_name: str
     club_id: str
-    annual_salary: float
-    contract_length_years: int
-    contract_expiry_year: int
-    contract_signing_date: Optional[date] = None
-    acquisition_fee: float
-    acquisition_year: int
-    annual_amortization: float = 0.0     # computed: fee / years
-    notes: str
+    set_by_role: str
+    set_by_user_id: str
 
-    # ── Loan override fields
-    is_on_loan: bool = False
+    # Only shows the fields that were actually overridden
+    name: Optional[str] = None
+    full_name: Optional[str] = None
+    age: Optional[int] = None
+    nationality: Optional[str] = None
+    position: Optional[str] = None
+    transfer_value: Optional[float] = None
+    annual_salary: Optional[float] = None
+    contract_signing_date: Optional[date] = None
+    contract_expiry_date: Optional[date] = None
+    contract_expiry_year: Optional[int] = None
+    contract_length_years: Optional[int] = None
+    acquisition_fee: Optional[float] = None
+    acquisition_year: Optional[int] = None
+    is_on_loan: Optional[bool] = None
     loan_from_club: Optional[str] = None
     loan_end_date: Optional[date] = None
-    loan_fee_paid: float = 0.0
-    loan_wage_contribution_pct: float = 100.0
+    loan_fee: Optional[float] = None
+    loan_wage_contribution_pct: Optional[float] = None
+    transfermarkt_url: Optional[str] = None
+    notes: str = ""
 
+    # Computed amortization shown in response for convenience
+    annual_amortization: float = 0.0
+
+    created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+SalaryOverrideRequest = PlayerOverrideRequest
+SalaryOverrideResponse = PlayerOverrideResponse

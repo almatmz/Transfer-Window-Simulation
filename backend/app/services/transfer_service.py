@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.core.security import UserRole
 from app.models.club import Club
 from app.models.player import Player
-from app.models.salary_override import SalaryOverride
+from app.models.player_override import PlayerOverride
 from app.models.transfer import (
     TransferSimulation, BuyEntry, SellEntry, LoanInEntry, LoanOutEntry,
     WindowType, YearlyProjection,
@@ -34,7 +34,7 @@ from app.utils.ffp_calculator import (
 _NOW_YEAR = 2026
 
 
-# ─────────────────────────────── Serializers ────────────────────────────────
+#  Serializers 
 
 def _serialize(sim: TransferSimulation) -> SimulationResponse:
     return SimulationResponse(
@@ -82,27 +82,53 @@ def _summary(sim: TransferSimulation) -> SimulationSummary:
     )
 
 
-# ────────────────────────── Player financials helper ────────────────────────
+#  Player financials helper 
 
 async def _player_financials(
-    api_football_player_id: int | None, is_sd: bool
+    api_football_player_id: int | None,
+    is_sd: bool,
+    viewer_user_id: str | None = None,
 ) -> tuple[float, int, float, int]:
+    """
+    Returns (annual_salary, contract_length_years, acquisition_fee, acquisition_year)
+    applying PlayerOverride priority:
+      SD viewer  -> SD own override > Admin override > raw DB
+      Everyone   -> Admin override > raw DB
+    """
     if not api_football_player_id:
         return 0.0, 0, 0.0, 0
     player = await Player.find_one(Player.api_football_id == api_football_player_id)
     if not player:
         return 0.0, 0, 0.0, 0
-    if is_sd:
-        override = await SalaryOverride.find_one(
-            SalaryOverride.player_id == str(player.id)
+
+    player_id = str(player.id)
+
+    if is_sd and viewer_user_id:
+        sd_ov = await PlayerOverride.find_one(
+            PlayerOverride.player_id == player_id,
+            PlayerOverride.set_by_user_id == viewer_user_id,
+            PlayerOverride.set_by_role == "sport_director",
         )
-        if override:
+        if sd_ov:
             return (
-                override.annual_salary,
-                override.contract_length_years,
-                override.acquisition_fee,
-                override.acquisition_year or 0,
+                sd_ov.annual_salary or player.estimated_annual_salary,
+                sd_ov.contract_length_years or player.contract_length_years,
+                sd_ov.acquisition_fee if sd_ov.acquisition_fee is not None else player.acquisition_fee,
+                sd_ov.acquisition_year or player.acquisition_year or 0,
             )
+
+    admin_ov = await PlayerOverride.find_one(
+        PlayerOverride.player_id == player_id,
+        PlayerOverride.set_by_role == "admin",
+    )
+    if admin_ov:
+        return (
+            admin_ov.annual_salary or player.estimated_annual_salary,
+            admin_ov.contract_length_years or player.contract_length_years,
+            admin_ov.acquisition_fee if admin_ov.acquisition_fee is not None else player.acquisition_fee,
+            admin_ov.acquisition_year or player.acquisition_year or 0,
+        )
+
     return (
         player.estimated_annual_salary,
         player.contract_length_years,
@@ -111,7 +137,7 @@ async def _player_financials(
     )
 
 
-# ─────────────────────────── Core FFP engine ────────────────────────────────
+#  Core FFP engine 
 
 async def _recompute(
     club: Club,
@@ -137,22 +163,15 @@ async def _recompute(
     for p in squad:
         if p.is_sold:
             continue
-        if is_sd:
-            ov = await SalaryOverride.find_one(SalaryOverride.player_id == str(p.id))
-            if ov:
-                baseline_wages += ov.annual_salary
-                baseline_amort += amortization_for_season(
-                    fee=ov.acquisition_fee,
-                    contract_years=ov.contract_length_years,
-                    acquisition_year=ov.acquisition_year or 0,
-                    target_season_year=target_year,
-                )
-                continue
-        baseline_wages += p.estimated_annual_salary
+        # Apply PlayerOverride priority: SD own > Admin > raw DB
+        sal, yrs, fee, acq_yr = await _player_financials(
+            p.api_football_id, is_sd, user_id
+        )
+        baseline_wages += sal
         baseline_amort += amortization_for_season(
-            fee=p.acquisition_fee,
-            contract_years=p.contract_length_years,
-            acquisition_year=p.acquisition_year or 0,
+            fee=fee,
+            contract_years=yrs,
+            acquisition_year=acq_yr,
             target_season_year=target_year,
         )
 
@@ -169,7 +188,7 @@ async def _recompute(
     sell_profit_loss = 0.0
 
     for s in sells:
-        sal, yrs, fee, acq_year = await _player_financials(s.api_football_player_id, is_sd)
+        sal, yrs, fee, acq_year = await _player_financials(s.api_football_player_id, is_sd, user_id)
         sell_wages += sal if sal else s.annual_salary
         if fee > 0 and yrs > 0 and acq_year > 0:
             sell_amort_relief += amortization_for_season(
@@ -194,7 +213,7 @@ async def _recompute(
     loan_fees_recv = sum(lo.loan_fee_received for lo in loans_out)
     loan_out_relief = 0.0
     for lo in loans_out:
-        sal, _, _, _ = await _player_financials(lo.api_football_player_id, is_sd)
+        sal, _, _, _ = await _player_financials(lo.api_football_player_id, is_sd, user_id)
         full_sal = sal if sal else lo.annual_salary
         loan_out_relief += full_sal * ((100 - lo.wage_contribution_pct) / 100)
 
@@ -255,7 +274,7 @@ async def _save_recomputed(
     return _serialize(sim)
 
 
-# ────────────────────────────── Auth helpers ────────────────────────────────
+#  Auth helpers 
 
 async def _get_sim_and_club(
     sim_id: str, user: User
@@ -288,7 +307,7 @@ def _check_index(target: list, index: int, label: str) -> None:
         )
 
 
-# ──────────────────────────────── CRUD ──────────────────────────────────────
+#  CRUD 
 
 async def create_simulation(
     data: SimulationCreateRequest, user: User
@@ -383,7 +402,7 @@ async def delete_simulation(sim_id: str, user: User) -> dict:
     return {"message": "Simulation deleted"}
 
 
-# ──────────────────────────── Add transfers ─────────────────────────────────
+# Add transfers
 
 async def add_buy(sim_id: str, data: AddBuyRequest, user: User) -> SimulationResponse:
     sim, club = await _get_sim_and_club(sim_id, user)
@@ -413,7 +432,7 @@ async def add_loan_out(
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-# ────────────────────── Update transfers (PATCH by index) ───────────────────
+#  Update transfers (PATCH by index) 
 
 async def update_transfer(
     sim_id: str,
@@ -448,7 +467,6 @@ async def update_transfer(
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-# ─────────────────────── Remove transfers ───────────────────────────────────
 
 async def remove_transfer(
     sim_id: str, list_name: str, index: int, user: User
@@ -461,7 +479,7 @@ async def remove_transfer(
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-# ─────────────────── Simulation squad projection (NEW) ──────────────────────
+#  Simulation squad projection 
 
 def _parse_season_year(season: str) -> int:
     """
@@ -501,7 +519,7 @@ async def get_simulation_squad_projection(
     """
     from app.services.squad_override_service import get_effective_squad
 
-    # ── 1. Load simulation ──────────────────────────────────────────────────
+    # ── 1. Load simulation
     sim = await TransferSimulation.get(sim_id)
     if not sim:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -510,10 +528,10 @@ async def get_simulation_squad_projection(
             status_code=403, detail="This simulation is private"
         )
 
-    # ── 2. Determine target season year ─────────────────────────────────────
+    #  2. Determine target season year 
     target_year = _parse_season_year(sim.season)
 
-    # ── 3. Effective base squad for that season ──────────────────────────────
+    #3. Effective base squad for that season 
     viewer_role = viewer.role.value
     base = await get_effective_squad(
         club_api_football_id=sim.club_api_football_id,
@@ -534,7 +552,7 @@ async def get_simulation_squad_projection(
         if p.get("api_football_id") is not None
     }
 
-    #  4a. Apply SELLS (remove from squad) 
+    # ── 4a. Apply SELLS (remove from squad) 
     sell_ids: set[int] = set()
     for sell in sim.sells:
         if sell.api_football_player_id:
@@ -550,7 +568,7 @@ async def get_simulation_squad_projection(
     players = [p for p in players if p.get("api_football_id") not in loan_out_ids]
     active_ids -= loan_out_ids
 
-    #  4c. Apply BUYS (add to squad) 
+    #  4c. Apply BUYS (add to squad)
     simulated_buys: list[dict] = []
     for buy in sim.buys:
         entry = {
@@ -577,7 +595,7 @@ async def get_simulation_squad_projection(
         simulated_buys.append(entry)
     players.extend(simulated_buys)
 
-    #  4d. Apply LOANS IN (add to squad, marked as loan) 
+    # ── 4d. Apply LOANS IN (add to squad, marked as loan) ────────────────────
     simulated_loans_in: list[dict] = []
     for li in sim.loans_in:
         entry = {

@@ -3,25 +3,65 @@ squad_override_service.py
 
 Builds the "effective squad" for a given club, season, and viewer.
 
-Effective squad = base squad (DB players, expired contracts removed)
-               + Admin SquadOverrides      (visible to all)
-               + Viewer's own SD overrides (visible only to that SD)
+TWO types of overrides are applied:
+
+1. PlayerOverride (from player_service) — field-level data overrides:
+     Admin PlayerOverride  → merges into every viewer's data (guests too)
+     SD PlayerOverride     → merges only for that SD on top of admin override
+
+2. SquadOverride — adds / removes entire players from the squad:
+     Admin SquadOverride   → applied for everyone
+     SD SquadOverride      → applied only for that SD
+
+Priority pipeline per player:
+  SD PlayerOverride > Admin PlayerOverride > raw DB Player document
 """
 from __future__ import annotations
 
 import logging
-from datetime import date
+from typing import Optional
 
 from app.models.club import Club
 from app.models.player import Player
+from app.models.player_override import PlayerOverride
 from app.models.squad_override import SquadOverride, OverrideAction
 
 logger = logging.getLogger(__name__)
 
 
-def _player_to_dict(p: Player) -> dict:
-    """Serialize a Player document to a plain dict for the squad response."""
-    return {
+# Override loader helpers 
+
+async def _get_admin_player_override(player_id: str) -> Optional[PlayerOverride]:
+    return await PlayerOverride.find_one(
+        PlayerOverride.player_id == player_id,
+        PlayerOverride.set_by_role == "admin",
+    )
+
+
+async def _get_sd_player_override(
+    player_id: str, viewer_id: str
+) -> Optional[PlayerOverride]:
+    return await PlayerOverride.find_one(
+        PlayerOverride.player_id == player_id,
+        PlayerOverride.set_by_user_id == viewer_id,
+        PlayerOverride.set_by_role == "sport_director",
+    )
+
+
+#  Player serializer with override 
+
+def _player_to_dict(
+    p: Player,
+    admin_ov: Optional[PlayerOverride] = None,
+    sd_ov: Optional[PlayerOverride] = None,
+) -> dict:
+    """
+    Serialize a Player to dict, applying PlayerOverride priority:
+      SD override > Admin override > raw DB values.
+    Only non-None override fields replace the base value.
+    """
+    # Start with raw DB values
+    data = {
         "id": str(p.id),
         "api_football_id": p.api_football_id,
         "name": p.name,
@@ -48,12 +88,71 @@ def _player_to_dict(p: Player) -> dict:
         "loan_end_date": p.loan_end_date.isoformat() if p.loan_end_date else None,
         "acquisition_fee": p.acquisition_fee,
         "transfermarkt_url": p.transfermarkt_url,
-        "source": "db",
+        "data_source": "db",
     }
+
+    # Apply admin override (layer 2)
+    if admin_ov:
+        _apply_player_override(data, admin_ov, "admin_override")
+
+    # Apply SD override (layer 1 — highest priority)
+    if sd_ov:
+        _apply_player_override(data, sd_ov, "sd_override")
+
+    return data
+
+
+def _apply_player_override(data: dict, ov: PlayerOverride, source_label: str) -> None:
+    """Apply non-None fields from a PlayerOverride onto the data dict."""
+    field_map = {
+        "name": "name",
+        "full_name": "full_name",
+        "age": "age",
+        "nationality": "nationality",
+        "position": "position",
+        "photo_url": "photo_url",
+        "transfer_value": "transfer_value",
+        "transfer_value_currency": "transfer_value_currency",
+        "contract_expiry_year": "contract_expiry_year",
+        "contract_length_years": "contract_length_years",
+        "is_on_loan": "is_on_loan",
+        "loan_from_club": "loan_from_club",
+        "transfermarkt_url": "transfermarkt_url",
+        "acquisition_fee": "acquisition_fee",
+    }
+    changed = False
+    for ov_field, data_field in field_map.items():
+        val = getattr(ov, ov_field, None)
+        if val is not None:
+            data[data_field] = val
+            changed = True
+
+    # Handle date fields (serialize to isoformat)
+    if ov.date_of_birth is not None:
+        data["date_of_birth"] = ov.date_of_birth.isoformat()
+        changed = True
+    if ov.contract_expiry_date is not None:
+        data["contract_expiry_date"] = ov.contract_expiry_date.isoformat()
+        changed = True
+    if ov.contract_signing_date is not None:
+        data["contract_signing_date"] = ov.contract_signing_date.isoformat()
+        changed = True
+    if ov.loan_end_date is not None:
+        data["loan_end_date"] = ov.loan_end_date.isoformat()
+        changed = True
+
+    # annual_salary maps to estimated_annual_salary
+    if ov.annual_salary is not None:
+        data["estimated_annual_salary"] = ov.annual_salary
+        data["salary_source"] = source_label
+        changed = True
+
+    if changed:
+        data["data_source"] = source_label
 
 
 def _override_to_dict(ov: SquadOverride) -> dict:
-    """Serialize a SquadOverride (ADD action) to a player-like dict."""
+    """Serialize a SquadOverride ADD entry to a player-like dict."""
     return {
         "id": str(ov.id),
         "api_football_id": ov.api_football_player_id,
@@ -72,18 +171,18 @@ def _override_to_dict(ov: SquadOverride) -> dict:
         "contract_expiry_date": None,
         "contract_length_years": ov.contract_length_years,
         "contract_signing_date": (
-            ov.contract_signing_date.isoformat()
-            if ov.contract_signing_date
-            else None
+            ov.contract_signing_date.isoformat() if ov.contract_signing_date else None
         ),
         "is_on_loan": ov.is_on_loan,
         "loan_from_club": ov.loan_from_club,
         "loan_end_date": ov.loan_end_date.isoformat() if ov.loan_end_date else None,
         "acquisition_fee": ov.acquisition_fee,
         "transfermarkt_url": None,
-        "source": f"override:{ov.set_by_role}",
+        "data_source": f"squad_override:{ov.set_by_role}",
     }
 
+
+# ─────────────────────── Main function ──────────────────────────────────────
 
 async def get_effective_squad(
     club_api_football_id: int,
@@ -96,45 +195,57 @@ async def get_effective_squad(
 
     Algorithm:
       1. Resolve club MongoDB _id from api_football_id.
-      2. Load all non-sold players for this club using club_id string (reliable).
-      3. Split into active / expired based on contract_expiry_year vs view_season.
-      4. Apply Admin SquadOverrides (visible to all viewers).
-      5. If viewer is Admin or SD: also apply their own SD SquadOverrides.
-      6. Return merged squad + metadata.
+      2. Load all non-sold players for this club using club_id string.
+      3. For each player, load their PlayerOverrides (admin + SD if applicable).
+      4. Serialize players with overrides applied.
+      5. Split into active / expired based on MERGED contract_expiry_year.
+      6. Apply SquadOverrides (add/remove entire players).
     """
+    is_sd_viewer = viewer_role in ("admin", "sport_director") and viewer_id is not None
 
-    #  1. Resolve club _id 
+    # ── 1. Resolve club _id ──────────────────────────────────────────────────
     club_doc = await Club.find_one(Club.api_football_id == club_api_football_id)
     if not club_doc:
         return {
-            "players": [],
-            "expired_contracts": [],
-            "admin_additions": [],
-            "admin_removals": [],
-            "sd_additions": [],
-            "sd_removals": [],
+            "players": [], "expired_contracts": [],
+            "admin_additions": [], "admin_removals": [],
+            "sd_additions": [], "sd_removals": [],
             "season_year": view_season,
         }
     club_id_str = str(club_doc.id)
 
-    #  2. Load players by club_id string (always reliably set)
+    # ── 2. Load players ──────────────────────────────────────────────────────
     all_players = await Player.find(
         Player.club_id == club_id_str,
         Player.is_sold == False,  # noqa: E712
     ).to_list()
 
-    #  3. Split active vs expired 
+    # ── 3 & 4. Serialize each player with PlayerOverrides applied ────────────
     active: list[dict] = []
     expired: list[dict] = []
 
     for p in all_players:
-        if p.contract_expiry_year > 0 and p.contract_expiry_year < view_season:
-            expired.append(_player_to_dict(p))
-        else:
-            active.append(_player_to_dict(p))
+        player_id = str(p.id)
 
-    # 4. Admin SquadOverrides (visible to everyone)
-    admin_overrides = await SquadOverride.find(
+        # Load admin override (applies to everyone)
+        admin_ov = await _get_admin_player_override(player_id)
+
+        # Load SD's own override (applies only to SD/Admin viewers)
+        sd_ov = None
+        if is_sd_viewer:
+            sd_ov = await _get_sd_player_override(player_id, viewer_id)
+
+        merged = _player_to_dict(p, admin_ov, sd_ov)
+
+        # ── 5. Split active vs expired using MERGED contract_expiry_year ────
+        expiry = merged.get("contract_expiry_year") or 0
+        if expiry > 0 and expiry < view_season:
+            expired.append(merged)
+        else:
+            active.append(merged)
+
+    # ── 6a. Admin SquadOverrides (add/remove whole players, visible to all) ──
+    admin_squad_ovs = await SquadOverride.find(
         SquadOverride.club_api_football_id == club_api_football_id,
         SquadOverride.set_by_role == "admin",
         SquadOverride.season_year == view_season,
@@ -144,7 +255,7 @@ async def get_effective_squad(
     admin_additions: list[dict] = []
     admin_removals: list[int] = []
 
-    for ov in admin_overrides:
+    for ov in admin_squad_ovs:
         if ov.action == OverrideAction.REMOVE and ov.api_football_player_id:
             admin_removals.append(ov.api_football_player_id)
         elif ov.action == OverrideAction.ADD:
@@ -153,21 +264,19 @@ async def get_effective_squad(
     active = [p for p in active if p.get("api_football_id") not in admin_removals]
     active.extend(admin_additions)
 
-    #  5. Viewer's own SD overrides (Admin / SD viewers only)
+    # ── 6b. SD's own SquadOverrides (only for SD/Admin viewers) ─────────────
     sd_additions: list[dict] = []
     sd_removals: list[int] = []
 
-    can_see_own_sd = viewer_role in ("admin", "sport_director") and viewer_id
-
-    if can_see_own_sd:
-        sd_overrides = await SquadOverride.find(
+    if is_sd_viewer:
+        sd_squad_ovs = await SquadOverride.find(
             SquadOverride.club_api_football_id == club_api_football_id,
             SquadOverride.set_by_user_id == viewer_id,
             SquadOverride.season_year == view_season,
             SquadOverride.is_active == True,  # noqa: E712
         ).to_list()
 
-        for ov in sd_overrides:
+        for ov in sd_squad_ovs:
             if ov.set_by_role == "admin":
                 continue  # already applied above
             if ov.action == OverrideAction.REMOVE and ov.api_football_player_id:
