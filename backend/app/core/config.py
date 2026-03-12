@@ -10,46 +10,51 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # App
+    # ── App
     APP_ENV: str = "development"
     APP_NAME: str = "Transfer Window Simulator"
     APP_VERSION: str = "2.0.0"
     API_V1_PREFIX: str = "/api/v1"
 
-    # Database
+    # ── Database
     MONGODB_URL: str
     DATABASE_NAME: str = "twsim"
 
-    # Security
+    # ── Security
     SECRET_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
-    # First-run admin seeding
+    # ── First-run admin seeding
     ADMIN_EMAIL: str = ""
     ADMIN_PASSWORD: str = ""
 
-    # External APIs
+    # ── External APIs
     API_FOOTBALL_KEY: str = ""
     API_FOOTBALL_KEY_TYPE: str = "direct"
     API_FOOTBALL_BASE_URL: str = "https://v3.football.api-sports.io"
     API_FOOTBALL_DAILY_LIMIT: int = 100
 
-    # Scraping
+    # ── Scraping
     CAPOLOGY_BASE_URL: str = "https://www.capology.com"
     SCRAPE_CACHE_TTL_HOURS: int = 24
 
-    # Cache
+    # ── Cache
     REDIS_URL: str = ""
 
-    # CORS
+    # ── CORS
     ALLOWED_ORIGINS: str = "http://localhost:3000"
 
-    # Groq AI
+    # ── Groq AI
     GROQ_API_KEY: str = ""
 
-    # Simulation constraints
-    # Users cannot simulate more than this many years into the future
+    # ── Apify (Transfermarkt scraper)
+    APIFY_API_TOKEN: str = ""
+
+    # ── Gemini AI (fallback to Groq)
+    GEMINI_API_KEY: str = ""
+
+    # ── Simulation constraints
     MAX_SIMULATION_FUTURE_YEARS: int = 3
 
     @field_validator("SECRET_KEY")
@@ -81,6 +86,14 @@ class Settings(BaseSettings):
     @property
     def has_groq(self) -> bool:
         return bool(self.GROQ_API_KEY)
+
+    @property
+    def has_apify(self) -> bool:
+        return bool(self.APIFY_API_TOKEN)
+
+    @property
+    def has_gemini(self) -> bool:
+        return bool(self.GEMINI_API_KEY)
 
     @property
     def api_football_headers(self) -> dict:

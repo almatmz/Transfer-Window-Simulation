@@ -5,6 +5,7 @@ from app.models.user import User
 from app.models.club import Club
 from app.models.player import Player
 from app.models.salary_override import SalaryOverride
+from app.models.squad_override import SquadOverride
 from app.models.transfer import TransferSimulation
 from app.models.user_revenue_override import UserRevenueOverride
 
@@ -18,6 +19,7 @@ async def init_db() -> None:
             Club,
             Player,
             SalaryOverride,
+            SquadOverride,
             TransferSimulation,
             UserRevenueOverride,
         ],
