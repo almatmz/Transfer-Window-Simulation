@@ -7,6 +7,8 @@ from app.core.security import UserRole
 from app.models.club import Club
 from app.models.player import Player
 from app.models.player_override import PlayerOverride
+from app.services.loan_deal_service import get_effective_loan_in, get_effective_loan_out
+from app.services.contract_extension_service import get_effective_extension
 from app.models.transfer import TransferSimulation
 from app.models.user import User
 from app.schemas.ffp import FFPDashboardResponse, FFPStatus, YearlyProjection as YP
@@ -27,7 +29,6 @@ from app.utils.ffp_calculator import (
 _NOW_YEAR = 2026
 
 
-# Override helpers 
 
 async def _get_player_financials(
     player: Player,
@@ -102,7 +103,7 @@ async def _get_salary_source(
     return player.salary_source or "position_estimate"
 
 
-# Main FFP function
+#  Main FFP function 
 
 async def get_ffp_dashboard_by_api_id(
     api_football_id: int,
@@ -128,11 +129,11 @@ async def get_ffp_dashboard_by_api_id(
     is_sd = bool(viewer and viewer.role in (UserRole.SPORT_DIRECTOR, UserRole.ADMIN))
     viewer_id = str(viewer.id) if viewer else None
 
-    # Revenue: official (global) OR this user's personal override 
+    # Revenue: official (global) OR this user's personal override
     from app.services.club_service import get_effective_revenue
     annual_revenue = await get_effective_revenue(club, viewer_id)
 
-    # Baseline squad wages + amortization 
+    #  Baseline squad wages + amortization 
     baseline_wages = 0.0
     baseline_amort = 0.0
     sources_used: set[str] = set()
@@ -141,8 +142,32 @@ async def get_ffp_dashboard_by_api_id(
         if player.is_sold:
             continue
 
+        player_id = str(player.id)
         sal, yrs, fee, acq_year = await _get_player_financials(player, is_sd, viewer_id)
         src = await _get_salary_source(player, is_sd, viewer_id)
+
+        # Contract extension: adjust salary and amort if extension is active this season
+        viewer_role_str = viewer.role.value if viewer and hasattr(viewer.role, 'value') else 'user'
+        ext = await get_effective_extension(player_id, is_sd, viewer_id, viewer_role_str)
+        if ext and ext.extension_start_year <= start_year:
+            if ext.new_annual_salary is not None:
+                sal = ext.new_annual_salary
+                src = f"{ext.set_by_role}_extension"
+            yrs = ext.new_contract_length_years
+            # Add signing bonus amortization
+            baseline_amort += ext.signing_bonus_amortization
+
+        # Loan OUT: player is at another club — reduce wage cost by receiving club's share
+        loan_out = await get_effective_loan_out(player_id, is_sd, viewer_id)
+        if loan_out and loan_out.is_active and not loan_out.option_exercised:
+            relief_pct = loan_out.wage_contribution_pct / 100
+            sal = sal * (1 - relief_pct)   # only pay the remaining %
+
+        # Loan IN: player is on loan — only pay our contribution %
+        loan_in = await get_effective_loan_in(player_id, is_sd, viewer_id)
+        if loan_in and loan_in.is_active and not loan_in.option_exercised:
+            sal = loan_in.annual_salary * loan_in.wage_contribution_pct / 100
+            src = f"loan_in_{loan_in.set_by_role}"
 
         baseline_wages += sal
         if fee > 0 and acq_year > 0:
@@ -154,7 +179,7 @@ async def get_ffp_dashboard_by_api_id(
             )
         sources_used.add(src)
 
-    #  Simulation overlay 
+    # Simulation overlay 
     sim = None
     net_spend = 0.0
     loan_fee_impact = 0.0
@@ -236,7 +261,7 @@ async def get_ffp_dashboard_by_api_id(
             loan_fee_impact -= lo.loan_fee_received
             net_spend -= lo.loan_fee_received
 
-    # Final totals 
+    #  Final totals 
     total_wages = max(baseline_wages + extra_wages - sell_wages, 0.0)
     total_amort = max(baseline_amort + extra_amort - sell_amort_relief, 0.0)
     current_scr = squad_cost_ratio_calc(annual_revenue, total_wages, total_amort)

@@ -1,21 +1,3 @@
-"""
-squad_override_service.py
-
-Builds the "effective squad" for a given club, season, and viewer.
-
-TWO types of overrides are applied:
-
-1. PlayerOverride (from player_service) — field-level data overrides:
-     Admin PlayerOverride  → merges into every viewer's data (guests too)
-     SD PlayerOverride     → merges only for that SD on top of admin override
-
-2. SquadOverride — adds / removes entire players from the squad:
-     Admin SquadOverride   → applied for everyone
-     SD SquadOverride      → applied only for that SD
-
-Priority pipeline per player:
-  SD PlayerOverride > Admin PlayerOverride > raw DB Player document
-"""
 from __future__ import annotations
 
 import logging
@@ -25,11 +7,11 @@ from app.models.club import Club
 from app.models.player import Player
 from app.models.player_override import PlayerOverride
 from app.models.squad_override import SquadOverride, OverrideAction
+from app.models.loan_deal import LoanDeal
 
 logger = logging.getLogger(__name__)
 
 
-# Override loader helpers 
 
 async def _get_admin_player_override(player_id: str) -> Optional[PlayerOverride]:
     return await PlayerOverride.find_one(
@@ -48,7 +30,7 @@ async def _get_sd_player_override(
     )
 
 
-#  Player serializer with override 
+# Player serializer with override 
 
 def _player_to_dict(
     p: Player,
@@ -88,6 +70,15 @@ def _player_to_dict(
         "loan_end_date": p.loan_end_date.isoformat() if p.loan_end_date else None,
         "acquisition_fee": p.acquisition_fee,
         "transfermarkt_url": p.transfermarkt_url,
+        "loaned_out": getattr(p, "loaned_out", False),
+        "loaned_out_to_club": getattr(p, "loaned_out_to_club", None),
+        "loaned_out_end_date": (
+            p.loaned_out_end_date.isoformat()
+            if getattr(p, "loaned_out_end_date", None)
+            else None
+        ),
+        "loan_option_to_buy": getattr(p, "loan_option_to_buy", False),
+        "loan_option_to_buy_fee": getattr(p, "loan_option_to_buy_fee", None),
         "data_source": "db",
     }
 
