@@ -1,186 +1,105 @@
-"use client";
+'use client';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { searchApi } from '@/lib/api/client';
+import { Card, Skeleton, EmptyState, Badge } from '@/components/ui';
+import { Search, MapPin, Trophy, ChevronRight } from 'lucide-react';
+import Link from 'next/link';
+import Image from 'next/image';
+import { useForm } from 'react-hook-form';
+import { z } from 'zod';
+import { zodResolver } from '@hookform/resolvers/zod';
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { searchApi } from "@/lib/api/client";
-import {
-  Input,
-  Button,
-  Card,
-  Skeleton,
-  ErrorMessage,
-  EmptyState,
-} from "@/components/ui";
-import { Search, MapPin, Trophy } from "lucide-react";
-import Link from "next/link";
-import Image from "next/image";
-import { motion, AnimatePresence } from "framer-motion";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { searchSchema } from "@/lib/schemas";
-import { z } from "zod";
-import type { ClubSearchResult } from "@/lib/api/types";
-
-type FormData = z.infer<typeof searchSchema>;
+const schema = z.object({ q: z.string().min(2, 'Enter at least 2 characters'), country: z.string().optional() });
+type F = z.infer<typeof schema>;
 
 export default function ClubSearchPage() {
-  const [searchParams, setSearchParams] = useState<{
-    q: string;
-    country: string;
-  } | null>(null);
-  const {
-    register,
-    handleSubmit,
-    formState: { errors },
-  } = useForm<FormData>({
-    resolver: zodResolver(searchSchema),
-    mode: "onSubmit",
-    reValidateMode: "onChange",
+  const [params, setParams] = useState<{ q: string; country: string } | null>(null);
+  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<F>({
+    resolver: zodResolver(schema), mode: 'onSubmit',
   });
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["clubs-search", searchParams],
-    queryFn: () =>
-      searchParams
-        ? searchApi.clubs(searchParams.q, searchParams.country)
-        : Promise.resolve([]),
-    enabled: !!searchParams,
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['clubs-search', params],
+    queryFn: () => params ? searchApi.clubs(params.q, params.country) : Promise.resolve([]),
+    enabled: !!params,
+    staleTime: 1000 * 60 * 30,
   });
 
-  const onSubmit = (values: FormData) => {
-    setSearchParams({ q: values.q, country: values.country || "" });
-  };
+  const onSubmit = (v: F) => setParams({ q: v.q, country: v.country || '' });
 
   return (
-    <div className="container mx-auto px-4 py-10 max-w-3xl">
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-      >
-        <div className="mb-8">
-          <h1 className="text-3xl font-display font-black mb-2">
-            Search Clubs
-          </h1>
-          <p className="text-muted-foreground">
-            Find any football club to view squad and FFP data
-          </p>
+    <div className="max-w-3xl mx-auto px-4 py-8">
+      <div className="mb-8 animate-fade-up">
+        <h1 className="font-display font-bold text-2xl mb-1">Search Clubs</h1>
+        <p className="text-sm text-muted-foreground">Find any football club to view squad, FFP, and simulations</p>
+      </div>
+
+      <form onSubmit={handleSubmit(onSubmit)} className="flex gap-2 mb-6 animate-fade-up" style={{animationDelay:'0.05s'}} noValidate>
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <input
+            placeholder="Club name, e.g. Manchester, Barcelona…"
+            className="w-full h-10 pl-10 pr-3 rounded-xl border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary placeholder:text-muted-foreground"
+            {...register('q')}
+          />
         </div>
+        <input placeholder="Country" className="w-32 h-10 px-3 rounded-xl border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary placeholder:text-muted-foreground hidden sm:block" {...register('country')} />
+        <button type="submit" disabled={isSubmitting || isLoading}
+          className="h-10 px-5 bg-primary text-white rounded-xl text-sm font-medium hover:bg-primary/90 transition-all disabled:opacity-50 flex items-center gap-2">
+          <Search className="w-3.5 h-3.5" />Search
+        </button>
+      </form>
+      {errors.q && <p className="text-xs text-destructive mb-4 -mt-4">{errors.q.message}</p>}
 
-        <form onSubmit={handleSubmit(onSubmit)} className="flex gap-2 mb-8">
-          <div className="flex-1">
-            <Input
-              placeholder="Club name, e.g. Manchester, Barcelona…"
-              error={errors.q?.message}
-              {...register("q")}
-            />
-          </div>
-          <div className="w-36">
-            <Input placeholder="Country (opt.)" {...register("country")} />
-          </div>
-          <Button type="submit" loading={isLoading}>
-            <Search className="w-4 h-4" />
-            Search
-          </Button>
-        </form>
+      {isLoading && (
+        <div className="space-y-2">
+          {[...Array(5)].map((_, i) => (
+            <div key={i} className="flex items-center gap-3 p-4 bg-card border border-border rounded-2xl">
+              <Skeleton className="w-10 h-10 rounded-xl shrink-0" />
+              <div className="flex-1 space-y-2"><Skeleton className="h-4 w-40" /><Skeleton className="h-3 w-28" /></div>
+            </div>
+          ))}
+        </div>
+      )}
 
-        {/* Results */}
-        {isLoading && (
-          <div className="space-y-3">
-            {[...Array(4)].map((_, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-4 p-4 bg-card border border-border rounded-xl"
-              >
-                <Skeleton className="w-12 h-12 rounded-lg" />
-                <div className="flex-1 space-y-2">
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="h-3 w-28" />
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+      {error && <p className="text-sm text-destructive p-4 bg-destructive/5 rounded-xl border border-destructive/10">{(error as Error).message}</p>}
 
-        {error && (
-          <ErrorMessage
-            message={(error as Error).message}
-            onRetry={() => refetch()}
-          />
-        )}
+      {data && !isLoading && (
+        <>
+          {data.length === 0 ? (
+            <EmptyState icon={<Trophy className="w-8 h-8" />} title="No clubs found" description="Try a different name or country" />
+          ) : (
+            <div className="space-y-1.5">
+              <p className="text-xs text-muted-foreground mb-3">{data.length} result{data.length !== 1 ? 's' : ''}</p>
+              {data.map((club, i) => (
+                <Link key={club.api_football_id} href={`/clubs/${club.api_football_id}`}
+                  className="flex items-center gap-3 p-3.5 bg-card border border-border rounded-2xl hover:border-primary/30 hover:shadow-sm transition-all group animate-fade-up"
+                  style={{ animationDelay: `${i * 0.03}s` }}>
+                  <div className="w-10 h-10 rounded-xl bg-secondary flex items-center justify-center shrink-0 overflow-hidden">
+                    {club.logo_url
+                      ? <Image src={club.logo_url} alt={club.name} width={36} height={36} className="object-contain" unoptimized />
+                      : <Trophy className="w-5 h-5 text-muted-foreground" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-sm truncate">{club.name}</p>
+                    <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-0.5">
+                      <MapPin className="w-3 h-3 shrink-0" />{club.country}
+                      {club.league && <><span className="text-border">·</span>{club.league}</>}
+                    </p>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+                </Link>
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
-        {data && !isLoading && (
-          <>
-            {data.length === 0 ? (
-              <EmptyState
-                icon={<Trophy className="w-7 h-7" />}
-                title="No clubs found"
-                description="Try a different name or country filter"
-              />
-            ) : (
-              <div className="space-y-2">
-                <p className="text-sm text-muted-foreground mb-3">
-                  {data.length} results
-                </p>
-                <AnimatePresence>
-                  {data.map((club: ClubSearchResult, i: number) => (
-                    <motion.div
-                      key={club.api_football_id}
-                      initial={{ opacity: 0, x: -8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.04 }}
-                    >
-                      <Link href={`/clubs/${club.api_football_id}`}>
-                        <Card hover className="flex items-center gap-4 p-4">
-                          <div className="w-12 h-12 rounded-lg bg-muted flex items-center justify-center shrink-0 overflow-hidden">
-                            {club.logo_url ? (
-                              <Image
-                                src={club.logo_url}
-                                alt={club.name}
-                                width={40}
-                                height={40}
-                                className="object-contain"
-                                unoptimized
-                              />
-                            ) : (
-                              <Trophy className="w-6 h-6 text-muted-foreground" />
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="font-display font-bold truncate">
-                              {club.name}
-                            </p>
-                            <p className="text-sm text-muted-foreground flex items-center gap-1.5 mt-0.5">
-                              <MapPin className="w-3 h-3" />
-                              {club.country}
-                              {club.league && (
-                                <span className="text-muted-foreground/50">
-                                  ·
-                                </span>
-                              )}
-                              {club.league}
-                            </p>
-                          </div>
-                          <div className="text-primary text-sm font-medium opacity-0 group-hover:opacity-100">
-                            View →
-                          </div>
-                        </Card>
-                      </Link>
-                    </motion.div>
-                  ))}
-                </AnimatePresence>
-              </div>
-            )}
-          </>
-        )}
-
-        {!searchParams && !isLoading && (
-          <EmptyState
-            icon={<Search className="w-7 h-7" />}
-            title="Search for a club"
-            description="Type a club name above to get started. Results are cached for 6 hours."
-          />
-        )}
-      </motion.div>
+      {!params && !isLoading && (
+        <EmptyState icon={<Search className="w-8 h-8" />} title="Search for a club"
+          description="Type a club name to get started. Results are cached for 30 minutes." />
+      )}
     </div>
   );
 }

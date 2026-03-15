@@ -1,135 +1,96 @@
 'use client';
-
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { authApi } from '@/lib/api/client';
 import { useAuth } from '@/lib/auth/context';
-import { Button, Card, Input, Skeleton, ErrorMessage, Badge } from '@/components/ui';
-import { roleColor, roleLabel, formatDate } from '@/lib/utils';
-import { User, Mail, Calendar, Building, Edit2, Check } from 'lucide-react';
-import { motion } from 'framer-motion';
-import { toast } from 'sonner';
-import { useState } from 'react';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { updateProfileSchema } from '@/lib/schemas';
-import { z } from 'zod';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-
-type FormData = z.infer<typeof updateProfileSchema>;
+import { useEffect, useState } from 'react';
+import { authApi } from '@/lib/api/client';
+import { Button, Input, Badge, Card, PageLoader } from '@/components/ui';
+import { roleColor, roleLabel, formatDate } from '@/lib/utils';
+import { User, Mail, Calendar, Shield, Edit, Check, X } from 'lucide-react';
+import { useForm } from 'react-hook-form';
+import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
 
 export default function ProfilePage() {
-  const { isAuthenticated, loading, refreshUser } = useAuth();
-  const qc = useQueryClient();
-  const [editing, setEditing] = useState(false);
+  const { user, loading, isAuthenticated, refreshUser, updateUser } = useAuth();
   const router = useRouter();
+  const [editing, setEditing] = useState(false);
 
-  const { data: user, isLoading, error, refetch } = useQuery({
-    queryKey: ['me'],
-    queryFn: authApi.me,
-    enabled: isAuthenticated,
+  useEffect(() => {
+    if (!loading && !isAuthenticated) router.replace('/login');
+  }, [loading, isAuthenticated]);
+
+  const { register, handleSubmit, reset, formState: { errors, isSubmitting } } = useForm<any>({
+    defaultValues: { full_name: user?.full_name ?? '', username: user?.username ?? '', club_affiliation: user?.club_affiliation ?? '' },
+    mode: 'onSubmit',
   });
 
-  const updateMut = useMutation({
-    mutationFn: authApi.updateMe,
-    onSuccess: () => {
-      toast.success('Profile updated');
-      setEditing(false);
-      qc.invalidateQueries({ queryKey: ['me'] });
-      refreshUser();
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
+  useEffect(() => {
+    if (user) reset({ full_name: user.full_name ?? '', username: user.username ?? '', club_affiliation: user.club_affiliation ?? '' });
+  }, [user]);
 
-  const { register, handleSubmit, reset, formState: { errors } } = useForm<FormData>({
-    resolver: zodResolver(updateProfileSchema),
-  });
-
-  if (!loading && !isAuthenticated) {
-    router.replace('/login');
-    return null;
-  }
-
-  if (isLoading || loading) return (
-    <div className="container mx-auto px-4 py-10 max-w-lg">
-      <Skeleton className="h-48 mb-4" />
-      <Skeleton className="h-64" />
-    </div>
-  );
-
-  if (error) return (
-    <div className="container mx-auto px-4 py-10">
-      <ErrorMessage message={(error as Error).message} onRetry={refetch} />
-    </div>
-  );
-
+  if (loading) return <PageLoader />;
   if (!user) return null;
 
-  const startEdit = () => {
-    reset({ full_name: user.full_name, username: user.username, club_affiliation: user.club_affiliation });
-    setEditing(true);
+  const onSubmit = async (data: any) => {
+    try {
+      const updated = await authApi.updateMe(data);
+      updateUser(updated);
+      toast.success('Profile updated');
+      setEditing(false);
+    } catch (e: any) { toast.error(e.message); }
   };
 
   return (
-    <div className="container mx-auto px-4 py-10 max-w-lg">
-      <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-        <h1 className="text-2xl font-display font-black mb-6">My Profile</h1>
-
-        <Card className="p-6 mb-4">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-4">
-              <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center">
-                <span className="text-2xl font-black text-primary">
-                  {user.username?.[0]?.toUpperCase()}
-                </span>
-              </div>
-              <div>
-                <h2 className="font-display font-bold text-lg">{user.username}</h2>
-                {user.full_name && <p className="text-muted-foreground text-sm">{user.full_name}</p>}
-                <Badge className={`mt-1 ${roleColor(user.role)}`}>{roleLabel(user.role)}</Badge>
-              </div>
-            </div>
-            <button onClick={startEdit}
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-secondary transition-all">
-              <Edit2 className="w-4 h-4" />
-            </button>
+    <div className="max-w-2xl mx-auto px-4 py-8 space-y-6">
+      <div className="flex items-center gap-3 animate-fade-up">
+        <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center text-primary font-bold text-xl font-display">
+          {user.username[0].toUpperCase()}
+        </div>
+        <div>
+          <h1 className="font-display font-bold text-2xl">{user.full_name || user.username}</h1>
+          <div className="flex items-center gap-2 mt-1">
+            <span className={cn('inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold border', roleColor(user.role))}>
+              {roleLabel(user.role)}
+            </span>
           </div>
+        </div>
+        <div className="ml-auto">
+          {!editing
+            ? <Button variant="outline" size="sm" icon={<Edit className="w-3.5 h-3.5" />} onClick={() => setEditing(true)}>Edit</Button>
+            : <Button variant="ghost" size="sm" icon={<X className="w-3.5 h-3.5" />} onClick={() => { setEditing(false); reset(); }}>Cancel</Button>}
+        </div>
+      </div>
 
-          <div className="space-y-3 text-sm">
-            <div className="flex items-center gap-3 text-muted-foreground">
-              <Mail className="w-4 h-4" />
-              <span>{user.email}</span>
+      <Card className="animate-fade-up" style={{animationDelay:'0.05s'} as any}>
+        {editing ? (
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+            <Input label="Full Name" {...register('full_name')} error={errors.full_name?.message} />
+            <Input label="Username" {...register('username')} helperText="Letters, numbers, underscore" error={errors.username?.message} />
+            <Input label="Club Affiliation" {...register('club_affiliation')} placeholder="Optional" />
+            <div className="flex gap-2">
+              <Button type="button" variant="secondary" className="flex-1" onClick={() => { setEditing(false); reset(); }}>Cancel</Button>
+              <Button type="submit" className="flex-1" loading={isSubmitting} icon={<Check className="w-3.5 h-3.5" />}>Save Changes</Button>
             </div>
-            {user.club_affiliation && (
-              <div className="flex items-center gap-3 text-muted-foreground">
-                <Building className="w-4 h-4" />
-                <span>{user.club_affiliation}</span>
+          </form>
+        ) : (
+          <div className="space-y-3">
+            {[
+              { icon: User, label: 'Username', value: user.username },
+              { icon: Mail, label: 'Email', value: user.email },
+              { icon: Shield, label: 'Role', value: roleLabel(user.role) },
+              { icon: User, label: 'Full Name', value: user.full_name || '—' },
+              { icon: User, label: 'Club Affiliation', value: user.club_affiliation || '—' },
+              { icon: Calendar, label: 'Member Since', value: formatDate(user.created_at) },
+            ].map(row => (
+              <div key={row.label} className="flex items-center gap-3 py-2 border-b border-border last:border-0">
+                <row.icon className="w-4 h-4 text-muted-foreground shrink-0" />
+                <span className="text-sm text-muted-foreground w-32 shrink-0">{row.label}</span>
+                <span className="text-sm font-medium">{row.value}</span>
               </div>
-            )}
-            <div className="flex items-center gap-3 text-muted-foreground">
-              <Calendar className="w-4 h-4" />
-              <span>Joined {formatDate(user.created_at)}</span>
-            </div>
+            ))}
           </div>
-        </Card>
-
-        {editing && (
-          <Card className="p-5">
-            <h3 className="font-display font-semibold mb-4">Edit Profile</h3>
-            <form onSubmit={handleSubmit(d => updateMut.mutate(d))} className="space-y-4">
-              <Input label="Full name" error={errors.full_name?.message} {...register('full_name')} />
-              <Input label="Username" error={errors.username?.message} {...register('username')} />
-              <Input label="Club affiliation" error={errors.club_affiliation?.message} {...register('club_affiliation')} />
-              <div className="flex gap-2 justify-end">
-                <Button variant="outline" type="button" onClick={() => setEditing(false)}>Cancel</Button>
-                <Button type="submit" loading={updateMut.isPending}>
-                  <Check className="w-4 h-4" /> Save changes
-                </Button>
-              </div>
-            </form>
-          </Card>
         )}
-      </motion.div>
+      </Card>
     </div>
   );
 }

@@ -1,420 +1,1058 @@
-'use client';
-
-import { useParams } from 'next/navigation';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { simulationsApi } from '@/lib/api/client';
-import { Button, Card, Skeleton, ErrorMessage, Badge, Tabs, Modal, Input, Select, KpiCard } from '@/components/ui';
-import { formatEur, formatDate, ffpStatusBg } from '@/lib/utils';
-import { SimProjectionChart } from '@/components/charts/FFPChart';
+"use client";
+import { useParams, useRouter } from "next/navigation";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Trash2, Plus, Edit2, ArrowLeft, ExternalLink, TrendingDown, TrendingUp,
-  ShoppingCart, DollarSign, ArrowLeftRight, UserMinus
-} from 'lucide-react';
-import Link from 'next/link';
-import { motion, AnimatePresence } from 'framer-motion';
-import { toast } from 'sonner';
-import { useState } from 'react';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { addBuySchema, addSellSchema, addLoanInSchema, addLoanOutSchema, updateSimMetaSchema } from '@/lib/schemas';
-import { z } from 'zod';
-import type { SimulationResponse, BuyEntry, SellEntry, LoanInEntry, LoanOutEntry } from '@/lib/api/types';
+  simulationsApi,
+  clubsApi,
+  searchApi,
+  CURRENT_SEASON,
+} from "@/lib/api/client";
+import type { SimulationResponse } from "@/lib/api/client";
+import { useAuth } from "@/lib/auth/context";
+import {
+  PageLoader,
+  ErrorMessage,
+  Badge,
+  Button,
+  Modal,
+  FFPBadge,
+  Tabs,
+  Card,
+  Skeleton,
+} from "@/components/ui";
+import { formatEur, formatDate } from "@/lib/utils";
+import {
+  ArrowLeft,
+  Plus,
+  Trash2,
+  Edit,
+  BarChart3,
+  Settings,
+  Search,
+  Loader2,
+  X,
+  Trophy,
+} from "lucide-react";
+import Link from "next/link";
+import Image from "next/image";
+import { toast } from "sonner";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useForm } from "react-hook-form";
+import { cn } from "@/lib/utils";
 
-type BuyForm = z.infer<typeof addBuySchema>;
-type SellForm = z.infer<typeof addSellSchema>;
-type LoanInForm = z.infer<typeof addLoanInSchema>;
-type LoanOutForm = z.infer<typeof addLoanOutSchema>;
-type MetaForm = z.infer<typeof updateSimMetaSchema>;
+const TABS = [
+  { id: "buys", label: "Buys", icon: "🟢" },
+  { id: "sells", label: "Sells", icon: "🔴" },
+  { id: "loans_in", label: "Loans In", icon: "🔵" },
+  { id: "loans_out", label: "Loans Out", icon: "🟠" },
+];
 
-const positions = ['GK', 'CB', 'LB', 'RB', 'CDM', 'CM', 'CAM', 'LM', 'RM', 'LW', 'RW', 'ST', 'CF'].map(p => ({ value: p, label: p }));
+// ── Inline player search: searches CLUBS then their squads ────
+function PlayerSearchField({
+  onSelect,
+  placeholder = "Search player by club…",
+}: {
+  onSelect: (p: {
+    name: string;
+    position?: string;
+    age?: number;
+    nationality?: string;
+    annual_salary?: number;
+    transfer_value?: number;
+    api_football_id?: number;
+  }) => void;
+  placeholder?: string;
+}) {
+  const [step, setStep] = useState<"club" | "player">("club");
+  const [clubQ, setClubQ] = useState("");
+  const [clubs, setClubs] = useState<any[]>([]);
+  const [clubLoading, setClubLoading] = useState(false);
+  const [selectedClub, setSelectedClub] = useState<any>(null);
+  const [players, setPlayers] = useState<any[]>([]);
+  const [playerLoading, setPlayerLoading] = useState(false);
+  const [playerQ, setPlayerQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const timer = useRef<any>(null);
 
-function TransferRow({ children, onDelete, loading }: { children: React.ReactNode; onDelete: () => void; loading?: boolean }) {
+  useEffect(() => {
+    function h(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node))
+        setOpen(false);
+    }
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  // Search clubs
+  useEffect(() => {
+    if (clubQ.length < 2) {
+      setClubs([]);
+      return;
+    }
+    clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      setClubLoading(true);
+      try {
+        setClubs(await searchApi.clubs(clubQ));
+      } catch {
+      } finally {
+        setClubLoading(false);
+      }
+    }, 350);
+    return () => clearTimeout(timer.current);
+  }, [clubQ]);
+
+  const pickClub = async (club: any) => {
+    setSelectedClub(club);
+    setStep("player");
+    setPlayerLoading(true);
+    setOpen(true);
+    try {
+      const data = await clubsApi.squad(club.api_football_id, CURRENT_SEASON);
+      const arr = data?.players ?? (Array.isArray(data) ? data : []);
+      setPlayers(arr);
+    } catch {
+      setPlayers([]);
+    } finally {
+      setPlayerLoading(false);
+    }
+  };
+
+  const filteredPlayers = playerQ
+    ? players.filter((p: any) =>
+        p.name?.toLowerCase().includes(playerQ.toLowerCase()),
+      )
+    : players;
+
+  const reset = () => {
+    setStep("club");
+    setSelectedClub(null);
+    setPlayers([]);
+    setClubQ("");
+    setPlayerQ("");
+    setOpen(false);
+  };
+
   return (
-    <div className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg border border-border/50">
-      <div className="flex-1 min-w-0">{children}</div>
-      <button
-        onClick={onDelete}
-        disabled={loading}
-        className="w-7 h-7 rounded flex items-center justify-center text-muted-foreground hover:text-red-500 hover:bg-red-500/10 transition-all disabled:opacity-50"
-      >
-        <Trash2 className="w-3.5 h-3.5" />
-      </button>
+    <div ref={ref} className="relative">
+      {step === "club" ? (
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <input
+            value={clubQ}
+            onChange={(e) => {
+              setClubQ(e.target.value);
+              setOpen(true);
+            }}
+            onFocus={() => setOpen(true)}
+            placeholder="Search club to browse players…"
+            className="w-full h-9 pl-9 pr-3 rounded-xl border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary placeholder:text-muted-foreground"
+          />
+          {clubLoading && (
+            <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
+          )}
+        </div>
+      ) : (
+        <div className="flex gap-2">
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-primary/10 border border-primary/20 rounded-xl text-xs font-medium text-primary shrink-0">
+            {selectedClub?.logo_url && (
+              <img
+                src={selectedClub.logo_url}
+                alt=""
+                className="w-4 h-4 object-contain"
+              />
+            )}
+            {selectedClub?.name}
+            <button onClick={reset} className="ml-1 hover:text-destructive">
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <input
+              value={playerQ}
+              onChange={(e) => {
+                setPlayerQ(e.target.value);
+                setOpen(true);
+              }}
+              onFocus={() => setOpen(true)}
+              placeholder="Filter player by name…"
+              className="w-full h-9 pl-9 pr-3 rounded-xl border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary placeholder:text-muted-foreground"
+            />
+          </div>
+        </div>
+      )}
+
+      {open && step === "club" && clubs.length > 0 && (
+        <div className="absolute z-50 top-full mt-1 left-0 right-0 bg-popover border border-border rounded-xl shadow-xl overflow-hidden animate-scale-in max-h-56 overflow-y-auto">
+          {clubs.slice(0, 8).map((c: any) => (
+            <button
+              key={c.api_football_id}
+              type="button"
+              onClick={() => pickClub(c)}
+              className="w-full flex items-center gap-3 px-3 py-2.5 text-sm hover:bg-secondary transition-colors text-left"
+            >
+              {c.logo_url && (
+                <img
+                  src={c.logo_url}
+                  alt=""
+                  className="w-5 h-5 object-contain shrink-0"
+                />
+              )}
+              <div>
+                <p className="font-medium">{c.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  {c.country} · {c.league}
+                </p>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {open && step === "player" && (
+        <div className="absolute z-50 top-full mt-1 left-0 right-0 bg-popover border border-border rounded-xl shadow-xl overflow-hidden animate-scale-in max-h-64 overflow-y-auto">
+          {playerLoading ? (
+            <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Loading squad…
+            </div>
+          ) : filteredPlayers.length === 0 ? (
+            <p className="p-4 text-sm text-muted-foreground">
+              No players found
+            </p>
+          ) : (
+            filteredPlayers.slice(0, 12).map((p: any) => (
+              <button
+                key={p.api_football_id ?? p.name}
+                type="button"
+                onClick={() => {
+                  onSelect({
+                    name: p.name,
+                    position: p.position,
+                    age: p.age,
+                    nationality: p.nationality,
+                    annual_salary: p.annual_salary,
+                    transfer_value: p.transfer_value,
+                    api_football_id: p.api_football_id,
+                  });
+                  reset();
+                }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 text-sm hover:bg-secondary transition-colors text-left"
+              >
+                <div className="w-8 h-8 rounded-full bg-secondary flex items-center justify-center shrink-0 overflow-hidden">
+                  {p.photo_url ? (
+                    <Image
+                      src={p.photo_url}
+                      alt={p.name}
+                      width={32}
+                      height={32}
+                      className="object-cover rounded-full"
+                      unoptimized
+                    />
+                  ) : (
+                    <span className="text-xs font-bold text-muted-foreground">
+                      {p.name?.[0]}
+                    </span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium truncate">{p.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {p.position}
+                    {p.age ? ` · ${p.age}` : ""}
+                    {p.nationality ? ` · ${p.nationality}` : ""}
+                  </p>
+                </div>
+                {p.transfer_value && (
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    {formatEur(p.transfer_value, true)}
+                  </span>
+                )}
+              </button>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-export default function SimulationPage() {
+// ── Main Page ─────────────────────────────────────────────────
+export default function SimDetailPage() {
   const { simId } = useParams<{ simId: string }>();
+  const { isAuthenticated, loading } = useAuth();
+  const router = useRouter();
   const qc = useQueryClient();
-  const [activeTab, setActiveTab] = useState('buys');
-  const [editModal, setEditModal] = useState(false);
-  const [addBuyModal, setAddBuyModal] = useState(false);
-  const [addSellModal, setAddSellModal] = useState(false);
-  const [addLoanInModal, setAddLoanInModal] = useState(false);
-  const [addLoanOutModal, setAddLoanOutModal] = useState(false);
+  const [tab, setTab] = useState("buys");
+  const [addOpen, setAddOpen] = useState(false);
+  const [editIdx, setEditIdx] = useState<number | null>(null);
+  const [renameOpen, setRenameOpen] = useState(false);
 
-  const { data: sim, isLoading, error, refetch } = useQuery({
-    queryKey: ['simulation', simId],
+  const {
+    data: sim,
+    isLoading,
+    error,
+  } = useQuery({
+    queryKey: ["sim", simId],
     queryFn: () => simulationsApi.get(simId),
+    enabled: !!simId && !!isAuthenticated,
+    staleTime: 1000 * 30,
   });
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['simulation', simId] });
+  useEffect(() => {
+    if (!loading && !isAuthenticated) router.replace("/login");
+  }, [loading, isAuthenticated, router]);
 
-  const mutOpts = (msg: string, closeModal?: () => void) => ({
-    onSuccess: (data: SimulationResponse) => {
-      toast.success(msg);
-      closeModal?.();
-      qc.setQueryData(['simulation', simId], data);
+  const deleteMutation = useMutation({
+    mutationFn: (idx: number) => {
+      if (tab === "buys") return simulationsApi.removeBuy(simId, idx);
+      if (tab === "sells") return simulationsApi.removeSell(simId, idx);
+      if (tab === "loans_in") return simulationsApi.removeLoanIn(simId, idx);
+      return simulationsApi.removeLoanOut(simId, idx);
     },
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["sim", simId] });
+      toast.success("Removed");
+    },
+    onError: (e: any) => toast.error(e.message),
   });
 
-  const metaMut = useMutation({ mutationFn: (d: MetaForm) => simulationsApi.updateMeta(simId, d), ...mutOpts('Updated', () => setEditModal(false)) });
-  const buyMut = useMutation({ mutationFn: (d: BuyForm) => simulationsApi.addBuy(simId, d), ...mutOpts('Player added', () => setAddBuyModal(false)) });
-  const removeBuyMut = useMutation({ mutationFn: (i: number) => simulationsApi.removeBuy(simId, i), ...mutOpts('Removed') });
-  const sellMut = useMutation({ mutationFn: (d: SellForm) => simulationsApi.addSell(simId, d), ...mutOpts('Player sold', () => setAddSellModal(false)) });
-  const removeSellMut = useMutation({ mutationFn: (i: number) => simulationsApi.removeSell(simId, i), ...mutOpts('Removed') });
-  const loanInMut = useMutation({ mutationFn: (d: LoanInForm) => simulationsApi.addLoanIn(simId, d), ...mutOpts('Loan in added', () => setAddLoanInModal(false)) });
-  const removeLoanInMut = useMutation({ mutationFn: (i: number) => simulationsApi.removeLoanIn(simId, i), ...mutOpts('Removed') });
-  const loanOutMut = useMutation({ mutationFn: (d: LoanOutForm) => simulationsApi.addLoanOut(simId, d), ...mutOpts('Loan out added', () => setAddLoanOutModal(false)) });
-  const removeLoanOutMut = useMutation({ mutationFn: (i: number) => simulationsApi.removeLoanOut(simId, i), ...mutOpts('Removed') });
-
-  const buyForm = useForm<BuyForm>({ resolver: zodResolver(addBuySchema), defaultValues: { age: 25, transfer_fee: 0, contract_length_years: 3 } });
-  const sellForm = useForm<SellForm>({ resolver: zodResolver(addSellSchema), defaultValues: { transfer_fee: 0, annual_salary: 0, contract_length_years: 1 } });
-  const loanInForm = useForm<LoanInForm>({ resolver: zodResolver(addLoanInSchema), defaultValues: { wage_contribution_pct: 50, loan_fee: 0, contract_length_years: 1, has_option_to_buy: false } });
-  const loanOutForm = useForm<LoanOutForm>({ resolver: zodResolver(addLoanOutSchema), defaultValues: { wage_contribution_pct: 0, loan_fee_received: 0, contract_length_years: 1, has_option_to_sell: false } });
-  const metaForm = useForm<MetaForm>({ resolver: zodResolver(updateSimMetaSchema) });
-
-  if (isLoading) return (
-    <div className="container mx-auto px-4 py-10 max-w-5xl space-y-4">
-      <Skeleton className="h-32" />
-      <div className="grid grid-cols-4 gap-4">
-        {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-20" />)}
+  if (loading || (!isAuthenticated && !loading)) return <PageLoader />;
+  if (isLoading)
+    return (
+      <div className="max-w-5xl mx-auto px-4 py-8 space-y-4">
+        <Skeleton className="h-8 w-64" />
+        <div className="grid grid-cols-4 gap-3">
+          {[...Array(4)].map((_, i) => (
+            <Skeleton key={i} className="h-20" />
+          ))}
+        </div>
+        <Skeleton className="h-10 w-72" />
+        <div className="space-y-2">
+          {[...Array(5)].map((_, i) => (
+            <Skeleton key={i} className="h-14" />
+          ))}
+        </div>
       </div>
-    </div>
-  );
+    );
+  if (error || !sim)
+    return <ErrorMessage message={(error as Error)?.message ?? "Not found"} />;
 
-  if (error) return (
-    <div className="container mx-auto px-4 py-10">
-      <ErrorMessage message={(error as Error).message} onRetry={refetch} />
-    </div>
-  );
-
-  if (!sim) return null;
-
-  const tabs = [
-    { id: 'buys', label: 'Buys', count: sim.buys.length },
-    { id: 'sells', label: 'Sells', count: sim.sells.length },
-    { id: 'loans-in', label: 'Loans In', count: sim.loans_in.length },
-    { id: 'loans-out', label: 'Loans Out', count: sim.loans_out.length },
-  ];
+  const currentList: any[] = (sim as any)[tab] || [];
+  const tabsData = TABS.map((t) => ({
+    ...t,
+    count: ((sim as any)[t.id] as any[])?.length ?? 0,
+  }));
 
   return (
-    <div className="container mx-auto px-4 py-10 max-w-5xl">
-      <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-        {/* Header */}
-        <div className="flex items-start justify-between gap-4 mb-5">
-          <div>
-            <Link href="/simulations" className="inline-flex items-center gap-2 text-muted-foreground hover:text-foreground text-sm mb-2 transition-colors">
-              <ArrowLeft className="w-4 h-4" /> Simulations
-            </Link>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-2xl font-display font-black">{sim.simulation_name}</h1>
-              <Badge className={ffpStatusBg(sim.overall_ffp_status)}>{sim.overall_ffp_status}</Badge>
-              {sim.used_salary_overrides && (
-                <Badge className="bg-amber-500/10 text-amber-500 border-amber-500/20">Real salaries</Badge>
-              )}
-            </div>
-            <p className="text-muted-foreground text-sm">
-              {sim.club_name} · {sim.season} · {sim.window_type === 'summer' ? '☀️ Summer' : '❄️ Winter'} window
+    <div className="max-w-5xl mx-auto px-4 py-6 space-y-5">
+      {/* Header */}
+      <div className="flex items-start gap-3">
+        <Link
+          href="/simulations"
+          className="p-1.5 rounded-lg hover:bg-secondary transition-colors mt-1"
+        >
+          <ArrowLeft className="w-4 h-4" />
+        </Link>
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <h1 className="font-display font-bold text-xl truncate">
+              {sim.simulation_name}
+            </h1>
+            <FFPBadge status={sim.overall_ffp_status} />
+            {sim.used_salary_overrides && (
+              <Badge variant="violet">Real salaries</Badge>
+            )}
+            {sim.is_public && <Badge variant="info">Public</Badge>}
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {sim.club_name} · {sim.window_type === "summer" ? "☀️" : "❄️"}{" "}
+            {sim.season} · Updated {formatDate(sim.updated_at)}
+          </p>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <Link href={`/ffp/${sim.club_api_football_id}?sim=${simId}`}>
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<BarChart3 className="w-3.5 h-3.5" />}
+            >
+              FFP
+            </Button>
+          </Link>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<Settings className="w-3.5 h-3.5" />}
+            onClick={() => setRenameOpen(true)}
+          />
+        </div>
+      </div>
+
+      {/* Summary KPIs */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          {
+            label: "Total Buys",
+            value: formatEur(sim.total_buy_fees, true),
+            sub: `${sim.buys.length} players`,
+            color: "text-emerald-600 dark:text-emerald-400",
+          },
+          {
+            label: "Total Sells",
+            value: formatEur(sim.total_sell_fees, true),
+            sub: `${sim.sells.length} players`,
+            color: "text-red-500",
+          },
+          {
+            label: "Loans Paid",
+            value: formatEur(sim.total_loan_fees_paid, true),
+            sub: `${sim.loans_in.length} in / ${sim.loans_out.length} out`,
+            color: "text-violet-500",
+          },
+          {
+            label: "Net Spend",
+            value: formatEur(sim.net_spend, true),
+            sub: "Total outlay",
+            color:
+              sim.net_spend > 0
+                ? "text-red-500"
+                : "text-emerald-600 dark:text-emerald-400",
+          },
+        ].map((k) => (
+          <Card key={k.label} className="text-center py-3">
+            <p className="text-xs text-muted-foreground mb-1">{k.label}</p>
+            <p className={cn("font-bold text-lg font-display", k.color)}>
+              {k.value}
             </p>
-          </div>
-          <div className="flex gap-2 shrink-0">
-            <button onClick={() => { metaForm.reset({ simulation_name: sim.simulation_name, window_type: sim.window_type, season: sim.season, is_public: sim.is_public }); setEditModal(true); }}
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-secondary transition-all">
-              <Edit2 className="w-4 h-4" />
-            </button>
-            <Link href={`/ffp/${sim.club_api_football_id}?sim_id=${sim.id}`}>
-              <button className="flex items-center gap-1.5 h-9 px-3 rounded-lg text-sm font-medium bg-primary/10 text-primary hover:bg-primary/20 transition-all">
-                <ExternalLink className="w-3.5 h-3.5" /> FFP Overlay
-              </button>
-            </Link>
-          </div>
-        </div>
+            <p className="text-xs text-muted-foreground">{k.sub}</p>
+          </Card>
+        ))}
+      </div>
 
-        {/* KPIs */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-          <KpiCard label="Total Buy Fees" value={formatEur(sim.total_buy_fees, true)} icon={<ShoppingCart className="w-4 h-4" />} />
-          <KpiCard label="Total Sell Fees" value={formatEur(sim.total_sell_fees, true)} icon={<TrendingUp className="w-4 h-4" />} />
-          <KpiCard
-            label="Net Spend"
-            value={formatEur(sim.net_spend, true)}
-            icon={<DollarSign className="w-4 h-4" />}
-            className={sim.net_spend > 0 ? 'border-red-500/20' : 'border-emerald-500/20'}
-          />
-          <KpiCard
-            label="Loan Balance"
-            value={formatEur(sim.total_loan_fees_received - sim.total_loan_fees_paid, true)}
-            icon={<ArrowLeftRight className="w-4 h-4" />}
-          />
-        </div>
+      {/* Tabs + Add button */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <Tabs
+          tabs={tabsData.map((t) => ({
+            id: t.id,
+            label: `${t.icon} ${t.label}`,
+            count: t.count,
+          }))}
+          active={tab}
+          onChange={setTab}
+        />
+        <Button
+          size="sm"
+          icon={<Plus className="w-3.5 h-3.5" />}
+          onClick={() => {
+            setEditIdx(null);
+            setAddOpen(true);
+          }}
+        >
+          Add{" "}
+          {tab === "buys"
+            ? "Buy"
+            : tab === "sells"
+              ? "Sell"
+              : tab === "loans_in"
+                ? "Loan In"
+                : "Loan Out"}
+        </Button>
+      </div>
 
-        {/* Transfer Tabs */}
-        <Card className="p-5 mb-5">
-          <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-            <Tabs items={tabs} active={activeTab} onChange={setActiveTab} />
-            <Button size="sm" onClick={() => {
-              if (activeTab === 'buys') setAddBuyModal(true);
-              else if (activeTab === 'sells') setAddSellModal(true);
-              else if (activeTab === 'loans-in') setAddLoanInModal(true);
-              else setAddLoanOutModal(true);
-            }}>
-              <Plus className="w-3.5 h-3.5" /> Add
+      {/* Transfer list */}
+      <div className="space-y-2">
+        {currentList.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground">
+            <Trophy className="w-8 h-8 mx-auto mb-2 opacity-20" />
+            <p className="text-sm">No {tab.replace("_", " ")} yet</p>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="mt-3"
+              icon={<Plus className="w-3.5 h-3.5" />}
+              onClick={() => {
+                setEditIdx(null);
+                setAddOpen(true);
+              }}
+            >
+              Add first
             </Button>
           </div>
+        ) : (
+          currentList.map((item: any, idx: number) => (
+            <div
+              key={idx}
+              className="flex items-center gap-3 p-3.5 bg-card border border-border rounded-2xl hover:border-primary/20 transition-all"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="font-semibold text-sm">{item.player_name}</p>
+                  {item.position && <Badge>{item.position}</Badge>}
+                </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                  {item.age && <span>Age {item.age}</span>}
+                  {item.nationality && <span>{item.nationality}</span>}
+                  {item.transfer_fee != null && (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                      Fee: {formatEur(item.transfer_fee, true)}
+                    </span>
+                  )}
+                  {item.loan_fee != null && (
+                    <span className="text-violet-500 font-medium">
+                      Loan fee: {formatEur(item.loan_fee, true)}
+                    </span>
+                  )}
+                  {item.loan_fee_received != null && (
+                    <span className="text-orange-500 font-medium">
+                      Recv: {formatEur(item.loan_fee_received, true)}
+                    </span>
+                  )}
+                  {item.annual_salary && (
+                    <span>
+                      Salary: {formatEur(item.annual_salary, true)}/yr
+                    </span>
+                  )}
+                  {item.contract_length_years && (
+                    <span>{item.contract_length_years}yr contract</span>
+                  )}
+                  {item.wage_contribution_pct != null && (
+                    <span>{item.wage_contribution_pct}% wages</span>
+                  )}
+                  {item.has_option_to_buy && (
+                    <Badge variant="violet">Option to buy</Badge>
+                  )}
+                  {item.has_option_to_sell && (
+                    <Badge variant="violet">Option to sell</Badge>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-1 shrink-0">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<Edit className="w-3.5 h-3.5" />}
+                  onClick={() => {
+                    setEditIdx(idx);
+                    setAddOpen(true);
+                  }}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<Trash2 className="w-3.5 h-3.5" />}
+                  className="text-muted-foreground hover:text-destructive"
+                  loading={deleteMutation.isPending}
+                  onClick={() => deleteMutation.mutate(idx)}
+                />
+              </div>
+            </div>
+          ))
+        )}
+      </div>
 
-          <AnimatePresence mode="wait">
-            {activeTab === 'buys' && (
-              <motion.div key="buys" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                {sim.buys.length === 0 ? (
-                  <p className="text-center text-sm text-muted-foreground py-6">No buys yet. Click Add to sign a player.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {sim.buys.map((b: BuyEntry, i: number) => (
-                      <TransferRow key={i} onDelete={() => removeBuyMut.mutate(i)} loading={removeBuyMut.isPending}>
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div>
-                            <span className="font-semibold">{b.player_name}</span>
-                            <span className="text-xs text-muted-foreground ml-2">{b.position} · Age {b.age}</span>
-                          </div>
-                          <div className="flex gap-3 text-sm">
-                            <span className="text-muted-foreground">Fee: <span className="font-medium text-foreground">{formatEur(b.transfer_fee, true)}</span></span>
-                            <span className="text-muted-foreground">Salary: <span className="font-medium text-foreground">{formatEur(b.annual_salary, true)}/yr</span></span>
-                            <span className="text-muted-foreground">{b.contract_length_years}yr</span>
-                          </div>
-                        </div>
-                      </TransferRow>
-                    ))}
-                  </div>
-                )}
-              </motion.div>
-            )}
-            {activeTab === 'sells' && (
-              <motion.div key="sells" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                {sim.sells.length === 0 ? (
-                  <p className="text-center text-sm text-muted-foreground py-6">No sells yet. Click Add to sell a player.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {sim.sells.map((s: SellEntry, i: number) => (
-                      <TransferRow key={i} onDelete={() => removeSellMut.mutate(i)} loading={removeSellMut.isPending}>
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div>
-                            <span className="font-semibold">{s.player_name}</span>
-                            <span className="text-xs text-muted-foreground ml-2">{s.position}</span>
-                          </div>
-                          <span className="text-sm">Fee: <span className="font-medium text-emerald-500">{formatEur(s.transfer_fee, true)}</span></span>
-                        </div>
-                      </TransferRow>
-                    ))}
-                  </div>
-                )}
-              </motion.div>
-            )}
-            {activeTab === 'loans-in' && (
-              <motion.div key="loans-in" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                {sim.loans_in.length === 0 ? (
-                  <p className="text-center text-sm text-muted-foreground py-6">No loans in yet.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {sim.loans_in.map((l: LoanInEntry, i: number) => (
-                      <TransferRow key={i} onDelete={() => removeLoanInMut.mutate(i)} loading={removeLoanInMut.isPending}>
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div>
-                            <span className="font-semibold">{l.player_name}</span>
-                            <span className="text-xs text-muted-foreground ml-2">{l.position}</span>
-                          </div>
-                          <div className="flex gap-3 text-sm">
-                            <span className="text-muted-foreground">Your wage: <span className="font-medium text-foreground">{l.wage_contribution_pct}%</span></span>
-                            <span className="text-muted-foreground">Salary: <span className="font-medium text-foreground">{formatEur(l.annual_salary, true)}/yr</span></span>
-                            {l.has_option_to_buy && <Badge className="bg-blue-500/10 text-blue-500 border-blue-500/20">OTB</Badge>}
-                          </div>
-                        </div>
-                      </TransferRow>
-                    ))}
-                  </div>
-                )}
-              </motion.div>
-            )}
-            {activeTab === 'loans-out' && (
-              <motion.div key="loans-out" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                {sim.loans_out.length === 0 ? (
-                  <p className="text-center text-sm text-muted-foreground py-6">No loans out yet.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {sim.loans_out.map((l: LoanOutEntry, i: number) => (
-                      <TransferRow key={i} onDelete={() => removeLoanOutMut.mutate(i)} loading={removeLoanOutMut.isPending}>
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div>
-                            <span className="font-semibold">{l.player_name}</span>
-                            <span className="text-xs text-muted-foreground ml-2">{l.position}</span>
-                          </div>
-                          <div className="flex gap-3 text-sm">
-                            <span className="text-muted-foreground">Still paying: <span className={`font-medium ${(l.wage_contribution_pct ?? 0) === 0 ? 'text-emerald-500' : 'text-foreground'}`}>{l.wage_contribution_pct}%</span></span>
-                            {l.loan_fee_received ? <span className="text-muted-foreground">Fee rcvd: <span className="font-medium text-emerald-500">{formatEur(l.loan_fee_received, true)}</span></span> : null}
-                          </div>
-                        </div>
-                      </TransferRow>
-                    ))}
-                  </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </Card>
+      {addOpen && (
+        <TransferEntryModal
+          open={addOpen}
+          onClose={() => {
+            setAddOpen(false);
+            setEditIdx(null);
+          }}
+          simId={simId}
+          tab={tab}
+          editIdx={editIdx}
+          editData={editIdx !== null ? currentList[editIdx] : null}
+        />
+      )}
+      <RenameModal
+        open={renameOpen}
+        onClose={() => setRenameOpen(false)}
+        sim={sim}
+      />
+    </div>
+  );
+}
 
-        {/* Projections chart */}
-        {sim.projections.length > 0 && (
-          <Card className="p-5">
-            <h3 className="font-display font-bold mb-4">Simulation Projections</h3>
-            <SimProjectionChart projections={sim.projections} />
-          </Card>
+// ── Transfer Entry Modal ──────────────────────────────────────
+function TransferEntryModal({
+  open,
+  onClose,
+  simId,
+  tab,
+  editIdx,
+  editData,
+}: {
+  open: boolean;
+  onClose: () => void;
+  simId: string;
+  tab: string;
+  editIdx: number | null;
+  editData: any;
+}) {
+  const qc = useQueryClient();
+  const isEdit = editIdx !== null;
+  const isBuy = tab === "buys",
+    isSell = tab === "sells",
+    isLoanIn = tab === "loans_in",
+    isLoanOut = tab === "loans_out";
+
+  const {
+    register,
+    handleSubmit,
+    setValue,
+    watch,
+    reset,
+    formState: { isSubmitting },
+  } = useForm<any>({
+    defaultValues: editData ?? {
+      position: "",
+      age: "",
+      nationality: "",
+      transfer_fee: "",
+      loan_fee: "",
+      loan_fee_received: "",
+      annual_salary: "",
+      contract_length_years: 1,
+      wage_contribution_pct: 100,
+      has_option_to_buy: false,
+      has_option_to_sell: false,
+    },
+    mode: "onSubmit",
+  });
+
+  const hasOptionBuy = watch("has_option_to_buy");
+  const hasOptionSell = watch("has_option_to_sell");
+
+  const handlePlayerSelect = (p: any) => {
+    if (p.name) setValue("player_name", p.name);
+    if (p.position) setValue("position", p.position);
+    if (p.age) setValue("age", p.age);
+    if (p.nationality) setValue("nationality", p.nationality);
+    if (p.annual_salary) setValue("annual_salary", p.annual_salary);
+    if (p.transfer_value)
+      setValue(isBuy ? "transfer_fee" : "transfer_fee", p.transfer_value);
+    if (p.api_football_id)
+      setValue("api_football_player_id", p.api_football_id);
+    toast.success(`Auto-filled: ${p.name}`);
+  };
+
+  const n = (v: any) => (v === "" || v == null ? undefined : Number(v));
+  const b = (v: any) => v === true || v === "true";
+
+  const onSubmit = async (data: any) => {
+    try {
+      if (isBuy) {
+        const body = {
+          player_name: data.player_name,
+          position: data.position || "",
+          age: n(data.age) ?? 0,
+          nationality: data.nationality || "",
+          transfer_fee: n(data.transfer_fee) ?? 0,
+          annual_salary: n(data.annual_salary) ?? 0,
+          contract_length_years: n(data.contract_length_years) ?? 1,
+          api_football_player_id: n(data.api_football_player_id),
+        };
+        isEdit
+          ? await simulationsApi.editBuy(simId, editIdx!, body)
+          : await simulationsApi.addBuy(simId, body);
+      } else if (isSell) {
+        const body = {
+          player_name: data.player_name,
+          position: data.position || "",
+          transfer_fee: n(data.transfer_fee) ?? 0,
+          annual_salary: n(data.annual_salary) ?? 0,
+          contract_length_years: n(data.contract_length_years) ?? 1,
+          api_football_player_id: n(data.api_football_player_id),
+        };
+        isEdit
+          ? await simulationsApi.editSell(simId, editIdx!, body)
+          : await simulationsApi.addSell(simId, body);
+      } else if (isLoanIn) {
+        const body = {
+          player_name: data.player_name,
+          position: data.position || "",
+          age: n(data.age) ?? 0,
+          loan_fee: n(data.loan_fee) ?? 0,
+          annual_salary: n(data.annual_salary) ?? 0,
+          wage_contribution_pct: n(data.wage_contribution_pct) ?? 100,
+          contract_length_years: n(data.contract_length_years) ?? 1,
+          has_option_to_buy: b(data.has_option_to_buy),
+          option_to_buy_fee: n(data.option_to_buy_fee),
+          api_football_player_id: n(data.api_football_player_id),
+        };
+        isEdit
+          ? await simulationsApi.editLoanIn(simId, editIdx!, body)
+          : await simulationsApi.addLoanIn(simId, body);
+      } else {
+        const body = {
+          player_name: data.player_name,
+          position: data.position || "",
+          loan_fee_received: n(data.loan_fee_received) ?? 0,
+          annual_salary: n(data.annual_salary) ?? 0,
+          wage_contribution_pct: n(data.wage_contribution_pct) ?? 100,
+          contract_length_years: n(data.contract_length_years) ?? 1,
+          has_option_to_sell: b(data.has_option_to_sell),
+          option_to_sell_fee: n(data.option_to_sell_fee),
+          api_football_player_id: n(data.api_football_player_id),
+        };
+        isEdit
+          ? await simulationsApi.editLoanOut(simId, editIdx!, body)
+          : await simulationsApi.addLoanOut(simId, body);
+      }
+      qc.invalidateQueries({ queryKey: ["sim", simId] });
+      toast.success(isEdit ? "Updated" : "Added successfully");
+      onClose();
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  };
+
+  const title = isBuy
+    ? "Buy"
+    : isSell
+      ? "Sell"
+      : isLoanIn
+        ? "Loan In"
+        : "Loan Out";
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`${isEdit ? "Edit" : "Add"} ${title}`}
+      size="md"
+    >
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        {/* Player search */}
+        {!isEdit && (
+          <div>
+            <p className="text-xs text-muted-foreground mb-1.5">
+              {isSell || isLoanOut
+                ? "Search your squad or fill manually"
+                : "Search any club to find a player (auto-fills fields)"}
+            </p>
+            <PlayerSearchField onSelect={handlePlayerSelect} />
+          </div>
         )}
 
-        {/* ─── MODALS ─────────────────────────────────────── */}
-
-        {/* Edit Meta */}
-        <Modal open={editModal} onClose={() => setEditModal(false)} title="Edit Simulation">
-          <form onSubmit={metaForm.handleSubmit(d => metaMut.mutate(d))} className="space-y-4">
-            <Input label="Name" error={metaForm.formState.errors.simulation_name?.message} {...metaForm.register('simulation_name')} />
-            <div className="grid grid-cols-2 gap-3">
-              <Select label="Window" options={[{ value: 'summer', label: 'Summer' }, { value: 'winter', label: 'Winter' }]} {...metaForm.register('window_type')} />
-              <Input label="Season" {...metaForm.register('season')} />
-            </div>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" {...metaForm.register('is_public')} />
-              Public
+        {/* Fields */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <label className="block text-xs font-medium mb-1">
+              Player Name <span className="text-destructive">*</span>
             </label>
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" type="button" onClick={() => setEditModal(false)}>Cancel</Button>
-              <Button type="submit" loading={metaMut.isPending}>Save</Button>
-            </div>
-          </form>
-        </Modal>
+            <input
+              {...register("player_name", { required: true })}
+              placeholder="Player name"
+              className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
+            />
+          </div>
 
-        {/* Add Buy */}
-        <Modal open={addBuyModal} onClose={() => setAddBuyModal(false)} title="Add Player Buy" size="lg">
-          <form onSubmit={buyForm.handleSubmit(d => buyMut.mutate(d))} className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Player Name" error={buyForm.formState.errors.player_name?.message} {...buyForm.register('player_name')} />
-              <Select label="Position" options={positions} {...buyForm.register('position')} />
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <Input label="Age" type="number" error={buyForm.formState.errors.age?.message} {...buyForm.register('age', { valueAsNumber: true })} />
-              <Input label="Transfer Fee (€)" type="number" error={buyForm.formState.errors.transfer_fee?.message} {...buyForm.register('transfer_fee', { valueAsNumber: true })} />
-              <Input label="Contract (years)" type="number" {...buyForm.register('contract_length_years', { valueAsNumber: true })} />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Annual Salary (€)" type="number" error={buyForm.formState.errors.annual_salary?.message} {...buyForm.register('annual_salary', { valueAsNumber: true })} />
-              <Input label="Nationality (opt.)" {...buyForm.register('nationality')} />
-            </div>
-            <Input label="API Football Player ID (opt.)" type="number" {...buyForm.register('api_football_player_id', { valueAsNumber: true, setValueAs: v => v === '' || isNaN(v) ? null : v })} />
-            <div className="flex gap-2 justify-end pt-2">
-              <Button variant="outline" type="button" onClick={() => setAddBuyModal(false)}>Cancel</Button>
-              <Button type="submit" loading={buyMut.isPending}><Plus className="w-3.5 h-3.5" /> Add Buy</Button>
-            </div>
-          </form>
-        </Modal>
+          <div>
+            <label className="block text-xs font-medium mb-1">Position</label>
+            <input
+              {...register("position")}
+              placeholder="Midfielder"
+              className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+          </div>
 
-        {/* Add Sell */}
-        <Modal open={addSellModal} onClose={() => setAddSellModal(false)} title="Add Player Sale" size="lg">
-          <form onSubmit={sellForm.handleSubmit(d => sellMut.mutate(d))} className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Player Name" error={sellForm.formState.errors.player_name?.message} {...sellForm.register('player_name')} />
-              <Select label="Position" options={positions} {...sellForm.register('position')} />
+          {(isBuy || isLoanIn) && (
+            <div>
+              <label className="block text-xs font-medium mb-1">Age</label>
+              <input
+                type="number"
+                min="15"
+                max="45"
+                {...register("age")}
+                className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Transfer Fee (€)" type="number" error={sellForm.formState.errors.transfer_fee?.message} {...sellForm.register('transfer_fee', { valueAsNumber: true })} />
-              <Input label="Annual Salary (€)" type="number" {...sellForm.register('annual_salary', { valueAsNumber: true })} />
-            </div>
-            <Input label="API Football Player ID (opt.)" type="number" {...sellForm.register('api_football_player_id', { valueAsNumber: true, setValueAs: v => v === '' || isNaN(v) ? null : v })} />
-            <div className="flex gap-2 justify-end pt-2">
-              <Button variant="outline" type="button" onClick={() => setAddSellModal(false)}>Cancel</Button>
-              <Button type="submit" loading={sellMut.isPending}><TrendingDown className="w-3.5 h-3.5" /> Add Sale</Button>
-            </div>
-          </form>
-        </Modal>
+          )}
 
-        {/* Add Loan In */}
-        <Modal open={addLoanInModal} onClose={() => setAddLoanInModal(false)} title="Add Loan In" size="lg">
-          <form onSubmit={loanInForm.handleSubmit(d => loanInMut.mutate(d))} className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Player Name" error={loanInForm.formState.errors.player_name?.message} {...loanInForm.register('player_name')} />
-              <Select label="Position" options={positions} {...loanInForm.register('position')} />
+          {isBuy && (
+            <div>
+              <label className="block text-xs font-medium mb-1">
+                Nationality
+              </label>
+              <input
+                {...register("nationality")}
+                placeholder="Spanish"
+                className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
             </div>
-            <div className="grid grid-cols-3 gap-3">
-              <Input label="Annual Salary (€)" type="number" error={loanInForm.formState.errors.annual_salary?.message} {...loanInForm.register('annual_salary', { valueAsNumber: true })} />
-              <Input label="Your wage % (0-100)" type="number" {...loanInForm.register('wage_contribution_pct', { valueAsNumber: true })} />
-              <Input label="Loan Fee (€)" type="number" {...loanInForm.register('loan_fee', { valueAsNumber: true })} />
+          )}
+
+          {(isBuy || isSell) && (
+            <div>
+              <label className="block text-xs font-medium mb-1">
+                Transfer Fee (€) <span className="text-destructive">*</span>
+              </label>
+              <input
+                type="number"
+                min="0"
+                {...register("transfer_fee")}
+                placeholder="e.g. 50000000"
+                className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
             </div>
-            <div className="grid grid-cols-3 gap-3">
-              <Input label="Contract (years, 1-3)" type="number" {...loanInForm.register('contract_length_years', { valueAsNumber: true })} />
-              <Input label="Age (opt.)" type="number" {...loanInForm.register('age', { valueAsNumber: true, setValueAs: v => v === '' || isNaN(v) ? null : v })} />
-              <Input label="API Football ID (opt.)" type="number" {...loanInForm.register('api_football_player_id', { valueAsNumber: true, setValueAs: v => v === '' || isNaN(v) ? null : v })} />
+          )}
+
+          {isLoanIn && (
+            <div>
+              <label className="block text-xs font-medium mb-1">
+                Loan Fee (€)
+              </label>
+              <input
+                type="number"
+                min="0"
+                {...register("loan_fee")}
+                placeholder="0"
+                className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
             </div>
-            <div className="p-3 bg-muted rounded-lg">
-              <label className="flex items-center gap-2 text-sm cursor-pointer mb-2">
-                <input type="checkbox" {...loanInForm.register('has_option_to_buy')} />
+          )}
+
+          {isLoanOut && (
+            <div>
+              <label className="block text-xs font-medium mb-1">
+                Loan Fee Received (€)
+              </label>
+              <input
+                type="number"
+                min="0"
+                {...register("loan_fee_received")}
+                placeholder="0"
+                className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-medium mb-1">
+              Annual Salary (€)
+            </label>
+            <input
+              type="number"
+              min="0"
+              {...register("annual_salary")}
+              placeholder="e.g. 3000000"
+              className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium mb-1">
+              Contract Length (years)
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="10"
+              {...register("contract_length_years")}
+              placeholder="3"
+              className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+            />
+          </div>
+
+          {(isLoanIn || isLoanOut) && (
+            <div>
+              <label className="block text-xs font-medium mb-1">
+                Wage Contribution %
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="100"
+                {...register("wage_contribution_pct")}
+                placeholder="100"
+                className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Option to buy (loan in) */}
+        {isLoanIn && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="opt_buy"
+                {...register("has_option_to_buy")}
+                className="w-4 h-4 rounded accent-primary"
+              />
+              <label htmlFor="opt_buy" className="text-sm font-medium">
                 Has option to buy
               </label>
-              {loanInForm.watch('has_option_to_buy') && (
-                <div className="grid grid-cols-2 gap-3 mt-2">
-                  <Input label="OTB Fee (€)" type="number" {...loanInForm.register('option_to_buy_fee', { valueAsNumber: true })} />
-                  <Input label="OTB Year" type="number" {...loanInForm.register('option_to_buy_year', { valueAsNumber: true })} />
+            </div>
+            {(hasOptionBuy === true || hasOptionBuy === "true") && (
+              <div className="grid grid-cols-2 gap-3 p-3 bg-secondary/50 rounded-xl">
+                <div>
+                  <label className="block text-xs font-medium mb-1">
+                    Option Fee (€)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    {...register("option_to_buy_fee")}
+                    className="w-full h-8 px-2.5 text-xs rounded-lg border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
                 </div>
-              )}
-            </div>
-            <div className="flex gap-2 justify-end pt-2">
-              <Button variant="outline" type="button" onClick={() => setAddLoanInModal(false)}>Cancel</Button>
-              <Button type="submit" loading={loanInMut.isPending}><Plus className="w-3.5 h-3.5" /> Add Loan In</Button>
-            </div>
-          </form>
-        </Modal>
+                <div>
+                  <label className="block text-xs font-medium mb-1">
+                    Option Year
+                  </label>
+                  <input
+                    type="number"
+                    {...register("option_to_buy_year")}
+                    className="w-full h-8 px-2.5 text-xs rounded-lg border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
-        {/* Add Loan Out */}
-        <Modal open={addLoanOutModal} onClose={() => setAddLoanOutModal(false)} title="Add Loan Out" size="lg">
-          <form onSubmit={loanOutForm.handleSubmit(d => loanOutMut.mutate(d))} className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Player Name" error={loanOutForm.formState.errors.player_name?.message} {...loanOutForm.register('player_name')} />
-              <Select label="Position" options={positions} {...loanOutForm.register('position')} />
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <Input label="Annual Salary (€)" type="number" {...loanOutForm.register('annual_salary', { valueAsNumber: true })} />
-              <Input label="Still paying % (0=off books)" type="number" {...loanOutForm.register('wage_contribution_pct', { valueAsNumber: true })} />
-              <Input label="Loan Fee Received (€)" type="number" {...loanOutForm.register('loan_fee_received', { valueAsNumber: true })} />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <Input label="Contract (years, 1-3)" type="number" {...loanOutForm.register('contract_length_years', { valueAsNumber: true })} />
-              <Input label="API Football ID (opt.)" type="number" {...loanOutForm.register('api_football_player_id', { valueAsNumber: true, setValueAs: v => v === '' || isNaN(v) ? null : v })} />
-            </div>
-            <div className="p-3 bg-muted rounded-lg">
-              <label className="flex items-center gap-2 text-sm cursor-pointer mb-2">
-                <input type="checkbox" {...loanOutForm.register('has_option_to_sell')} />
-                Has option to sell
+        {/* Option to sell (loan out) */}
+        {isLoanOut && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="opt_sell"
+                {...register("has_option_to_sell")}
+                className="w-4 h-4 rounded accent-primary"
+              />
+              <label htmlFor="opt_sell" className="text-sm font-medium">
+                Has option/obligation to sell
               </label>
-              {loanOutForm.watch('has_option_to_sell') && (
-                <div className="grid grid-cols-2 gap-3 mt-2">
-                  <Input label="OTS Fee (€)" type="number" {...loanOutForm.register('option_to_sell_fee', { valueAsNumber: true })} />
-                  <Input label="OTS Year" type="number" {...loanOutForm.register('option_to_sell_year', { valueAsNumber: true })} />
+            </div>
+            {(hasOptionSell === true || hasOptionSell === "true") && (
+              <div className="grid grid-cols-2 gap-3 p-3 bg-secondary/50 rounded-xl">
+                <div>
+                  <label className="block text-xs font-medium mb-1">
+                    Option Fee (€)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    {...register("option_to_sell_fee")}
+                    className="w-full h-8 px-2.5 text-xs rounded-lg border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  />
                 </div>
-              )}
-            </div>
-            <div className="flex gap-2 justify-end pt-2">
-              <Button variant="outline" type="button" onClick={() => setAddLoanOutModal(false)}>Cancel</Button>
-              <Button type="submit" loading={loanOutMut.isPending}><UserMinus className="w-3.5 h-3.5" /> Add Loan Out</Button>
-            </div>
-          </form>
-        </Modal>
-      </motion.div>
-    </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <Button
+            type="button"
+            variant="secondary"
+            className="flex-1"
+            onClick={onClose}
+          >
+            Cancel
+          </Button>
+          <Button type="submit" className="flex-1" loading={isSubmitting}>
+            {isEdit ? "Update" : "Add"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ── Rename Modal ──────────────────────────────────────────────
+function RenameModal({
+  open,
+  onClose,
+  sim,
+}: {
+  open: boolean;
+  onClose: () => void;
+  sim: SimulationResponse;
+}) {
+  const qc = useQueryClient();
+  const {
+    register,
+    handleSubmit,
+    formState: { isSubmitting },
+  } = useForm<any>({
+    defaultValues: {
+      simulation_name: sim.simulation_name,
+      window_type: sim.window_type,
+      season: sim.season,
+      is_public: sim.is_public,
+    },
+  });
+  const onSubmit = async (data: any) => {
+    try {
+      await simulationsApi.update(sim.id, data);
+      qc.invalidateQueries({ queryKey: ["sim", sim.id] });
+      toast.success("Updated");
+      onClose();
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  };
+  return (
+    <Modal open={open} onClose={onClose} title="Edit Simulation" size="sm">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-3" noValidate>
+        <div>
+          <label className="block text-xs font-medium mb-1">Name</label>
+          <input
+            {...register("simulation_name")}
+            className="w-full h-9 px-3 text-sm rounded-xl border border-input bg-background focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="block text-xs font-medium mb-1">Window</label>
+            <select
+              {...register("window_type")}
+              className="w-full h-9 px-2.5 text-xs rounded-lg border border-input bg-background focus:outline-none"
+            >
+              <option value="summer">☀️ Summer</option>
+              <option value="winter">❄️ Winter</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium mb-1">Season</label>
+            <input
+              {...register("season")}
+              className="w-full h-9 px-2.5 text-xs rounded-lg border border-input bg-background focus:outline-none"
+            />
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            id="pub"
+            {...register("is_public")}
+            className="w-4 h-4 rounded accent-primary"
+          />
+          <label htmlFor="pub" className="text-sm">
+            Make public
+          </label>
+        </div>
+        <div className="flex gap-2 pt-1">
+          <Button
+            type="button"
+            variant="secondary"
+            className="flex-1"
+            onClick={onClose}
+          >
+            Cancel
+          </Button>
+          <Button type="submit" className="flex-1" loading={isSubmitting}>
+            Save
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }

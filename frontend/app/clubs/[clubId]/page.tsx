@@ -1,225 +1,158 @@
 'use client';
-
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { clubsApi } from '@/lib/api/client';
+import { clubsApi, ffpApi, CURRENT_SEASON } from '@/lib/api/client';
 import { useAuth } from '@/lib/auth/context';
-import { Button, Card, Skeleton, ErrorMessage, Badge, Modal, Input, KpiCard } from '@/components/ui';
-import { formatDateTime, ffpStatusBg, roleColor, roleLabel, formatEur } from '@/lib/utils';
-import { Users, BarChart3, Plus, RefreshCw, DollarSign, Calendar, Globe, Trophy, ChevronRight } from 'lucide-react';
+import { PageLoader, ErrorMessage, Badge, Button, Card, KpiCard, FFPBadge, Modal } from '@/components/ui';
+import { formatEur, formatDate, formatPct } from '@/lib/utils';
+import { Users, BarChart3, RefreshCw, TrendingUp, Trophy, MapPin, Calendar, DollarSign, Settings } from 'lucide-react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { motion } from 'framer-motion';
-import { useState } from 'react';
 import { toast } from 'sonner';
+import { useState } from 'react';
 import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { revenueSchema } from '@/lib/schemas';
-import { z } from 'zod';
-import { SimulationCreateModal } from '@/components/forms/SimulationCreateModal';
-
-type RevenueFormData = z.infer<typeof revenueSchema>;
 
 export default function ClubPage() {
   const { clubId } = useParams<{ clubId: string }>();
-  const id = Number(clubId);
-  const { isAuthenticated, role } = useAuth();
+  const id = parseInt(clubId);
+  const { role, isAuthenticated } = useAuth();
   const qc = useQueryClient();
-  const [revenueModal, setRevenueModal] = useState(false);
-  const [simModal, setSimModal] = useState(false);
-  const router = useRouter();
+  const [revenueOpen, setRevenueOpen] = useState(false);
+  const isSdOrAdmin = role === 'sport_director' || role === 'admin';
 
-  const { data: club, isLoading, error, refetch } = useQuery({
-    queryKey: ['club', id],
-    queryFn: () => clubsApi.get(id),
-    enabled: !isNaN(id),
+  const { data: club, isLoading, error } = useQuery({
+    queryKey: ['club', id, CURRENT_SEASON],
+    queryFn: () => clubsApi.get(id, CURRENT_SEASON),
+    enabled: !!id,
   });
 
-  const syncMut = useMutation({
+  const { data: ffp, isLoading: ffpLoading } = useQuery({
+    queryKey: ['ffp', id],
+    queryFn: () => ffpApi.dashboard(id),
+    enabled: !!id,
+  });
+
+  const syncMutation = useMutation({
     mutationFn: () => clubsApi.sync(id),
     onSuccess: () => {
-      toast.success('Squad sync initiated');
       qc.invalidateQueries({ queryKey: ['club', id] });
       qc.invalidateQueries({ queryKey: ['squad', id] });
+      toast.success('Sync started — data will update shortly');
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: any) => toast.error(e.message),
   });
 
-  const revenueMut = useMutation({
-    mutationFn: (data: RevenueFormData) => clubsApi.setRevenue(id, data),
-    onSuccess: () => {
-      toast.success('Revenue updated');
-      setRevenueModal(false);
-      qc.invalidateQueries({ queryKey: ['club', id] });
-      qc.invalidateQueries({ queryKey: ['ffp', id] });
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
-  const { register, handleSubmit, formState: { errors } } = useForm<RevenueFormData>({
-    resolver: zodResolver(revenueSchema),
-    defaultValues: { season_year: new Date().getFullYear() },
-  });
-
-  const canManage = role === 'sport_director' || role === 'admin';
-
-  if (isLoading) return (
-    <div className="container mx-auto px-4 py-10 max-w-4xl">
-      <div className="flex gap-5 mb-8">
-        <Skeleton className="w-24 h-24 rounded-2xl" />
-        <div className="flex-1 space-y-3">
-          <Skeleton className="h-8 w-64" />
-          <Skeleton className="h-4 w-40" />
-          <Skeleton className="h-4 w-32" />
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-4">
-        {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-28" />)}
-      </div>
-    </div>
-  );
-
-  if (error) return (
-    <div className="container mx-auto px-4 py-10">
-      <ErrorMessage message={(error as Error).message} onRetry={refetch} />
-    </div>
-  );
-
-  if (!club) return null;
+  if (isLoading) return <PageLoader />;
+  if (error || !club) return <ErrorMessage message={(error as Error)?.message ?? 'Club not found'} />;
 
   return (
-    <div className="container mx-auto px-4 py-10 max-w-4xl">
-      <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
-
-        {/* Header */}
-        <Card className="p-6 mb-6">
-          <div className="flex flex-col sm:flex-row gap-5">
-            <div className="w-20 h-20 rounded-2xl bg-muted flex items-center justify-center shrink-0 overflow-hidden shadow-lg">
-              {club.logo_url ? (
-                <Image src={club.logo_url} alt={club.name} width={64} height={64} className="object-contain" unoptimized />
-              ) : (
-                <Trophy className="w-8 h-8 text-muted-foreground" />
-              )}
-            </div>
-            <div className="flex-1">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h1 className="text-3xl font-display font-black">{club.name}</h1>
-                  <p className="text-muted-foreground font-medium">{club.short_name}</p>
-                </div>
-                {canManage && (
-                  <div className="flex gap-2 flex-wrap">
-                    <Button variant="outline" size="sm" onClick={() => setRevenueModal(true)}>
-                      <DollarSign className="w-3.5 h-3.5" /> Set Revenue
-                    </Button>
-                    <Button variant="outline" size="sm" loading={syncMut.isPending} onClick={() => syncMut.mutate()}>
-                      <RefreshCw className="w-3.5 h-3.5" /> Force Sync
-                    </Button>
-                  </div>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-3 mt-3 text-sm text-muted-foreground">
-                <span className="flex items-center gap-1.5"><Globe className="w-3.5 h-3.5" />{club.country}</span>
-                <span className="flex items-center gap-1.5"><Trophy className="w-3.5 h-3.5" />{club.league}</span>
-                <span className="flex items-center gap-1.5"><Calendar className="w-3.5 h-3.5" />Season {club.season_year}</span>
-                <span className="text-muted-foreground/50">Synced: {formatDateTime(club.last_synced_at)}</span>
-              </div>
-            </div>
+    <div className="max-w-5xl mx-auto px-4 py-8 space-y-6">
+      {/* Header */}
+      <div className="flex items-start gap-4 animate-fade-up">
+        <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center shrink-0 overflow-hidden border border-border">
+          {club.logo_url
+            ? <Image src={club.logo_url} alt={club.name} width={56} height={56} className="object-contain" unoptimized />
+            : <Trophy className="w-8 h-8 text-muted-foreground" />}
+        </div>
+        <div className="flex-1 min-w-0">
+          <h1 className="font-display font-bold text-2xl truncate">{club.name}</h1>
+          <div className="flex flex-wrap items-center gap-2 mt-1.5">
+            <span className="flex items-center gap-1 text-xs text-muted-foreground"><MapPin className="w-3 h-3" />{club.country}</span>
+            <span className="text-border text-xs">·</span>
+            <span className="text-xs text-muted-foreground">{club.league}</span>
+            <Badge variant="info">{club.season_year}/{String(club.season_year + 1).slice(2)}</Badge>
+            {ffp && <FFPBadge status={ffp.current_ffp_status.status} />}
           </div>
-        </Card>
-
-        {/* Action Cards */}
-        <div className="grid sm:grid-cols-3 gap-4 mb-6">
-          <Link href={`/clubs/${id}/squad`}>
-            <Card hover className="p-5 flex items-center gap-4 group">
-              <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500">
-                <Users className="w-5 h-5" />
-              </div>
-              <div>
-                <p className="font-display font-bold">Squad</p>
-                <p className="text-xs text-muted-foreground">View all players</p>
-              </div>
-              <ChevronRight className="w-4 h-4 text-muted-foreground ml-auto group-hover:text-primary transition-colors" />
-            </Card>
-          </Link>
-
-          <Link href={`/ffp/${id}`}>
-            <Card hover className="p-5 flex items-center gap-4 group">
-              <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-500">
-                <BarChart3 className="w-5 h-5" />
-              </div>
-              <div>
-                <p className="font-display font-bold">FFP Dashboard</p>
-                <p className="text-xs text-muted-foreground">Compliance analysis</p>
-              </div>
-              <ChevronRight className="w-4 h-4 text-muted-foreground ml-auto group-hover:text-emerald-500 transition-colors" />
-            </Card>
-          </Link>
-
-          {isAuthenticated ? (
-            <button onClick={() => setSimModal(true)} className="text-left">
-              <Card hover className="p-5 flex items-center gap-4 group">
-                <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
-                  <Plus className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="font-display font-bold">New Simulation</p>
-                  <p className="text-xs text-muted-foreground">Plan transfers</p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-muted-foreground ml-auto group-hover:text-primary transition-colors" />
-              </Card>
-            </button>
-          ) : (
-            <Link href="/login">
-              <Card hover className="p-5 flex items-center gap-4 group opacity-60">
-                <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
-                  <Plus className="w-5 h-5" />
-                </div>
-                <div>
-                  <p className="font-display font-bold">New Simulation</p>
-                  <p className="text-xs text-muted-foreground">Sign in to simulate</p>
-                </div>
-              </Card>
-            </Link>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          {isSdOrAdmin && (
+            <>
+              <Button variant="outline" size="sm" icon={<DollarSign className="w-3.5 h-3.5" />}
+                onClick={() => setRevenueOpen(true)}>Revenue</Button>
+              <Button variant="outline" size="sm" icon={<RefreshCw className="w-3.5 h-3.5" />}
+                loading={syncMutation.isPending} onClick={() => syncMutation.mutate()}>Sync</Button>
+            </>
           )}
         </div>
+      </div>
 
-        {/* Revenue Modal */}
-        <Modal open={revenueModal} onClose={() => setRevenueModal(false)} title="Set Club Revenue">
-          <form onSubmit={handleSubmit(d => revenueMut.mutate(d))} className="space-y-4">
-            <Input
-              label="Annual Revenue (€)"
-              type="number"
-              placeholder="e.g. 200000000"
-              error={errors.annual_revenue?.message}
-              {...register('annual_revenue', { valueAsNumber: true })}
-            />
-            <Input
-              label="Season Year"
-              type="number"
-              error={errors.season_year?.message}
-              {...register('season_year', { valueAsNumber: true })}
-            />
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" type="button" onClick={() => setRevenueModal(false)}>Cancel</Button>
-              <Button type="submit" loading={revenueMut.isPending}>Save Revenue</Button>
+      {/* Quick Nav */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 animate-fade-up" style={{animationDelay:'0.05s'}}>
+        {[
+          { href: `/clubs/${id}/squad`, icon: Users, label: 'View Squad', desc: 'Players & contracts' },
+          { href: `/ffp/${id}`, icon: BarChart3, label: 'FFP Dashboard', desc: 'Compliance & projections' },
+          { href: `/simulations?club=${id}&name=${encodeURIComponent(club.name)}`, icon: TrendingUp, label: 'Simulate', desc: 'Build transfer scenarios' },
+          ...(isSdOrAdmin ? [{ href: `/clubs/${id}/overrides`, icon: Settings, label: 'Squad Overrides', desc: 'Manage squad data' }] : []),
+        ].map(item => (
+          <Link key={item.href} href={item.href}
+            className="p-4 bg-card border border-border rounded-2xl hover:border-primary/30 hover:shadow-sm transition-all group">
+            <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center mb-2 group-hover:bg-primary/20 transition-all">
+              <item.icon className="w-4 h-4 text-primary" />
             </div>
-          </form>
-        </Modal>
+            <p className="font-semibold text-sm">{item.label}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">{item.desc}</p>
+          </Link>
+        ))}
+      </div>
 
-        {/* Simulation Create Modal */}
-        {simModal && (
-          <SimulationCreateModal
-            clubId={id}
-            clubName={club.name}
-            onClose={() => setSimModal(false)}
-            onCreated={(simId) => {
-              setSimModal(false);
-              router.push(`/simulations/${simId}`);
-            }}
-          />
-        )}
-      </motion.div>
+      {/* FFP KPIs */}
+      {ffp && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 animate-fade-up" style={{animationDelay:'0.1s'}}>
+          <KpiCard label="Annual Revenue" value={formatEur(ffp.annual_revenue, true)}
+            sub={ffp.revenue_configured ? 'Official' : 'Not configured'}
+            icon={<DollarSign className="w-4 h-4" />} />
+          <KpiCard label="Wage Bill" value={formatEur(ffp.current_wage_bill, true)}
+            icon={<TrendingUp className="w-4 h-4" />} />
+          <KpiCard label="Squad Cost Ratio" value={formatPct(ffp.current_squad_cost_ratio)}
+            sub={`Limit: ${formatPct(ffp.squad_cost_ratio_limit)}`} />
+          <KpiCard label="FFP Status" value={ffp.current_ffp_status.badge || ffp.current_ffp_status.status}
+            sub={ffp.current_ffp_status.reason || '—'} />
+        </div>
+      )}
+
+      {/* Last sync */}
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground animate-fade-up" style={{animationDelay:'0.15s'}}>
+        <Calendar className="w-3.5 h-3.5" />
+        Last synced: {formatDate(club.last_synced_at)}
+      </div>
+
+      {/* Revenue Modal */}
+      <RevenueModal open={revenueOpen} onClose={() => setRevenueOpen(false)}
+        clubId={id} seasonYear={club.season_year} currentRevenue={club.annual_revenue} />
     </div>
+  );
+}
+
+function RevenueModal({ open, onClose, clubId, seasonYear, currentRevenue }: {
+  open: boolean; onClose: () => void; clubId: number; seasonYear: number; currentRevenue: number;
+}) {
+  const qc = useQueryClient();
+  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<{ revenue: number }>({
+    defaultValues: { revenue: currentRevenue / 1_000_000 }, mode: 'onSubmit',
+  });
+  const onSubmit = async (data: { revenue: number }) => {
+    try {
+      await clubsApi.setRevenue(clubId, { annual_revenue: data.revenue * 1_000_000, season_year: seasonYear });
+      qc.invalidateQueries({ queryKey: ['club', clubId] });
+      qc.invalidateQueries({ queryKey: ['ffp', clubId] });
+      toast.success('Revenue updated');
+      onClose();
+    } catch (e: any) { toast.error(e.message); }
+  };
+  return (
+    <Modal open={open} onClose={onClose} title="Set Annual Revenue" size="sm">
+      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4" noValidate>
+        <div>
+          <label className="block text-sm font-medium mb-1.5">Annual Revenue (€M)</label>
+          <input type="number" step="0.1" min="0"
+            className="w-full h-9 px-3 rounded-xl border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary"
+            {...register('revenue', { required: true, min: 0, valueAsNumber: true })} />
+        </div>
+        <div className="flex gap-2">
+          <Button type="button" variant="secondary" className="flex-1" onClick={onClose}>Cancel</Button>
+          <Button type="submit" className="flex-1" loading={isSubmitting}>Save</Button>
+        </div>
+      </form>
+    </Modal>
   );
 }

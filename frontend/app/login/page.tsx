@@ -1,41 +1,46 @@
 "use client";
-
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { loginSchema } from "@/lib/schemas";
 import { useAuth } from "@/lib/auth/context";
 import { useRouter } from "next/navigation";
+import { useEffect } from "react";
 import { toast } from "sonner";
 import Link from "next/link";
-import { Button, Input } from "@/components/ui";
+import { Button, Input, PageLoader } from "@/components/ui";
 import { Trophy, ArrowRight } from "lucide-react";
-import { motion } from "framer-motion";
 
-type FormData = z.infer<typeof loginSchema>;
+const schema = z.object({
+  email: z.string().email("Valid email required"),
+  password: z.string().min(1, "Password required"),
+});
+type F = z.infer<typeof schema>;
 
 export default function LoginPage() {
-  const { login, isAuthenticated } = useAuth();
+  const { login, isAuthenticated, loading } = useAuth();
   const router = useRouter();
   const {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-  } = useForm<FormData>({
-    resolver: zodResolver(loginSchema),
+  } = useForm<F>({
+    resolver: zodResolver(schema),
     mode: "onSubmit",
   });
 
-  if (isAuthenticated) {
-    router.replace("/");
-    return null;
-  }
+  // Fix: use useEffect for redirect, never during render
+  useEffect(() => {
+    if (!loading && isAuthenticated) router.replace("/simulations");
+  }, [loading, isAuthenticated, router]);
 
-  const onSubmit = async (data: FormData) => {
+  if (loading) return <PageLoader />;
+  if (isAuthenticated) return null;
+
+  const onSubmit = async (data: F) => {
     try {
       await login(data.email, data.password);
       toast.success("Welcome back!");
-      router.push("/");
+      router.push("/simulations");
     } catch (e: any) {
       toast.error(e.message || "Login failed");
     }
@@ -43,30 +48,31 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-[80vh] flex items-center justify-center p-4">
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="w-full max-w-sm"
-      >
+      <div className="w-full max-w-sm animate-fade-up">
         <div className="text-center mb-8">
           <Link
             href="/"
-            className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-primary mb-4 shadow-lg shadow-primary/30"
+            className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-primary mb-4 shadow-md shadow-primary/20"
           >
-            <Trophy className="w-6 h-6 text-white" />
+            <Trophy className="w-5 h-5 text-white" />
           </Link>
-          <h1 className="text-2xl font-display font-black">Sign in</h1>
+          <h1 className="text-2xl font-display font-bold">Sign in</h1>
           <p className="text-muted-foreground text-sm mt-1">
             Access your simulations and club data
           </p>
         </div>
-
-        <div className="bg-card border border-border rounded-2xl p-6 shadow-xl">
-          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+        <div className="bg-card border border-border rounded-2xl p-6 shadow-sm">
+          <form
+            onSubmit={handleSubmit(onSubmit)}
+            className="space-y-4"
+            noValidate
+            autoComplete="on"
+          >
             <Input
               label="Email"
               type="email"
               placeholder="you@example.com"
+              autoComplete="email"
               error={errors.email?.message}
               {...register("email")}
             />
@@ -74,6 +80,7 @@ export default function LoginPage() {
               label="Password"
               type="password"
               placeholder="••••••••"
+              autoComplete="current-password"
               error={errors.password?.message}
               {...register("password")}
             />
@@ -82,7 +89,6 @@ export default function LoginPage() {
             </Button>
           </form>
         </div>
-
         <p className="text-center text-sm text-muted-foreground mt-5">
           No account?{" "}
           <Link
@@ -92,7 +98,7 @@ export default function LoginPage() {
             Create one free
           </Link>
         </p>
-      </motion.div>
+      </div>
     </div>
   );
 }
