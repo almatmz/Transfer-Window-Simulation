@@ -167,27 +167,8 @@ export const searchApi = {
 export const clubsApi = {
   get: (id: number, season = CURRENT_SEASON) =>
     apiFetch<ClubResponse>(`/clubs/${id}?season=${season}`),
-  squad: async (id: number, viewSeason = CURRENT_SEASON) => {
-    const data = await apiFetch<any>(
-      `/clubs/${id}/squad?view_season=${viewSeason}`,
-    );
-    // Debug: log the actual shape in development
-    if (process.env.NODE_ENV === "development") {
-      if (Array.isArray(data)) {
-        console.log("[Squad] flat array, length:", data.length);
-      } else if (data && typeof data === "object") {
-        console.log(
-          "[Squad] object keys:",
-          Object.keys(data),
-          "| array keys:",
-          Object.keys(data)
-            .filter((k) => Array.isArray((data as any)[k]))
-            .map((k) => `${k}(${(data as any)[k].length})`),
-        );
-      }
-    }
-    return data as SquadResponse;
-  },
+  squad: (id: number, viewSeason = CURRENT_SEASON) =>
+    apiFetch<SquadResponse>(`/clubs/${id}/squad?view_season=${viewSeason}`),
   setRevenue: (
     id: number,
     body: { annual_revenue: number; season_year: number },

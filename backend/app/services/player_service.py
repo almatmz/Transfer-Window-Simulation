@@ -1,16 +1,3 @@
-"""
-player_service.py
-
-Data priority when serving a player:
-  1. Viewer's own SD override   (if viewer is SD/Admin and has one)
-  2. Admin override             (if one exists — visible to everyone)
-  3. Raw DB Player document     (always the fallback)
-
-Admin sets override  → everyone sees it (guests too)
-SD sets override     → only that SD sees it (on top of admin override or raw DB)
-SD deletes override  → falls back to admin override (or raw DB if no admin override)
-Admin deletes override → everyone falls back to raw DB
-"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -36,7 +23,7 @@ from app.utils.amortization import (
 _NOW_YEAR = 2026
 
 
-# ─────────────────────────── Override loader helpers ────────────────────────
+#Override loader helpers 
 
 async def _get_admin_override(player_id: str) -> Optional[PlayerOverride]:
     """Returns the single Admin override for a player, or None."""
@@ -55,7 +42,7 @@ async def _get_sd_override(player_id: str, user_id: str) -> Optional[PlayerOverr
     )
 
 
-# ─────────────────────────── Merge helper ───────────────────────────────────
+# Merge helper 
 
 def _merge(player: Player, admin_ov: Optional[PlayerOverride], sd_ov: Optional[PlayerOverride]) -> dict:
     """
@@ -136,7 +123,7 @@ def _apply_field(data: dict, field: str, val) -> None:
     data[field] = val
 
 
-# ─────────────────────────── Serializers ────────────────────────────────────
+#Serializers 
 
 def _to_public(player: Player, merged: dict) -> PlayerPublicResponse:
     """Build the public response from a merged data dict."""
@@ -225,7 +212,6 @@ def _to_sd(
     )
 
 
-# ─────────────────────────── Public API ─────────────────────────────────────
 
 async def _find_player(api_football_id: int) -> Player:
     player = await Player.find_one(Player.api_football_id == api_football_id)
@@ -272,16 +258,34 @@ async def list_squad(
         Player.is_sold == False,  # noqa: E712
     ).to_list()
 
+    if not players:
+        return []
+
     is_sd = _is_sd(viewer)
     viewer_id = str(viewer.id) if viewer else None
-    result = []
+    player_ids = [str(p.id) for p in players]
 
+    # Bulk load admin overrides — 1 query for all players
+    admin_ovs_list = await PlayerOverride.find(
+        {"player_id": {"$in": player_ids}, "set_by_role": "admin"}
+    ).to_list()
+    admin_ov_map: dict[str, PlayerOverride] = {ov.player_id: ov for ov in admin_ovs_list}
+
+    # Bulk load this SD's overrides — 1 query (only if SD/Admin)
+    sd_ov_map: dict[str, PlayerOverride] = {}
+    if is_sd and viewer_id:
+        sd_ovs_list = await PlayerOverride.find(
+            {"player_id": {"$in": player_ids}, "set_by_user_id": viewer_id, "set_by_role": "sport_director"}
+        ).to_list()
+        sd_ov_map = {ov.player_id: ov for ov in sd_ovs_list}
+
+    result = []
     for player in players:
-        player_id = str(player.id)
-        admin_ov = await _get_admin_override(player_id)
+        pid = str(player.id)
+        admin_ov = admin_ov_map.get(pid)
 
         if is_sd:
-            sd_ov = await _get_sd_override(player_id, viewer_id)
+            sd_ov = sd_ov_map.get(pid)
             merged = _merge(player, admin_ov, sd_ov)
             result.append(_to_sd(player, merged, admin_ov, sd_ov))
         else:
@@ -291,7 +295,7 @@ async def list_squad(
     return result
 
 
-# ─────────────────────────── Override CRUD ──────────────────────────────────
+# Override CRUD 
 
 async def set_player_override(
     api_football_id: int,
