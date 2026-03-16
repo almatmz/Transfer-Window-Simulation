@@ -26,7 +26,7 @@ from app.utils.ffp_calculator import (
 _NOW_YEAR = 2026
 
 
-# Bulk loader 
+#  Bulk loader 
 
 class SquadContext:
     """
@@ -238,6 +238,111 @@ def _effective_wage(
     return sal, yrs, fee, acq_year, src, extra_amort
 
 
+#  Per-year wage bill 
+
+def _player_active_in_year(
+    player: Player,
+    ctx: SquadContext,
+    is_sd: bool,
+    viewer_id: str | None,
+    target_year: int,
+) -> bool:
+    """
+    Returns True if a player is still under contract in target_year.
+    Considers contract extensions (which push out the expiry year).
+    Loans end when loan_end_date passes — loaned-out players still count
+    for the parent club's wage bill at their reduced contribution.
+    """
+    pid = str(player.id)
+
+    # Check contract extension first — it may extend the expiry year
+    ext = ctx.get_extension(pid, is_sd, viewer_id)
+    if ext and ext.extension_start_year <= target_year:
+        # Extension is active — use extended expiry year
+        return ext.new_contract_expiry_year >= target_year
+
+    # Use merged override expiry year, else raw DB value
+    _, _, _, _, src = ctx.get_financials(player, is_sd, viewer_id)
+    ov = ctx.sd_overrides.get(pid) or ctx.admin_overrides.get(pid)
+    expiry = (ov.contract_expiry_year if ov and ov.contract_expiry_year else None)              or player.contract_expiry_year
+
+    if expiry and expiry > 0 and expiry < target_year:
+        return False  # contract expired before this season
+
+    return True
+
+
+def _compute_yearly_wage_bill(
+    active_players: list,
+    loaned_in_players: list,
+    loan_in_by_player: dict,
+    ctx: "SquadContext",
+    is_sd: bool,
+    viewer_id: str | None,
+    projection_years: int,
+    start_year: int,
+) -> list[float]:
+    """
+    Returns a list of wage bills, one per projection year.
+    Each year filters out players whose contracts have expired,
+    respects extensions, and adjusts for loans ending mid-projection.
+    Zero DB calls — uses pre-loaded ctx.
+    """
+    wage_bills = []
+
+    for i in range(projection_years):
+        target_year = start_year + i
+        year_wages = 0.0
+
+        for player in active_players:
+            if not _player_active_in_year(player, ctx, is_sd, viewer_id, target_year):
+                continue  # contract expired — not in wage bill this year
+
+            sal, yrs, fee, acq_year, src, _ = _effective_wage(
+                player, ctx, is_sd, viewer_id, target_year
+            )
+
+            # Loan OUT expiry: if loan ended, full wage returns to parent club
+            pid = str(player.id)
+            loan_out = ctx.get_loan(pid, "out", is_sd, viewer_id)
+            if loan_out and loan_out.loan_end_date:
+                if loan_out.loan_end_date.year < target_year:
+                    # Loan has ended — player back, pay full salary
+                    sal, _, _, _, _, _ = _effective_wage(
+                        player, ctx, is_sd, viewer_id, target_year
+                    )
+                    # Remove the loan_out reduction by re-computing without it
+                    base_sal, _, _, _, _, _ = ctx.get_financials(player, is_sd, viewer_id)
+                    ext = ctx.get_extension(pid, is_sd, viewer_id)
+                    if ext and ext.extension_start_year <= target_year and ext.new_annual_salary:
+                        base_sal = ext.new_annual_salary
+                    sal = base_sal  # full salary, loan relief gone
+
+            year_wages += sal
+
+        # Loaned-in players: only count while loan is active
+        for player in loaned_in_players:
+            pid = str(player.id)
+            deal = loan_in_by_player.get(pid)
+            if deal:
+                # Check if loan is still active this year
+                if deal.loan_end_date and deal.loan_end_date.year < target_year:
+                    continue  # loan ended
+                wage_cost = deal.annual_salary * deal.wage_contribution_pct / 100
+            else:
+                # Direct loan from player fields
+                lo_end = getattr(player, "loaned_out_end_date", None)
+                if lo_end and lo_end.year < target_year:
+                    continue  # loan ended
+                pct = getattr(player, "loaned_out_wage_contribution_pct", 100.0)
+                wage_cost = player.estimated_annual_salary * pct / 100
+            year_wages += wage_cost
+
+        wage_bills.append(round(year_wages, 2))
+
+    return wage_bills
+
+
 #  Main FFP function 
 
 async def get_ffp_dashboard_by_api_id(
@@ -269,7 +374,7 @@ async def get_ffp_dashboard_by_api_id(
     from app.services.club_service import get_effective_revenue
     annual_revenue = await get_effective_revenue(club, viewer_id)
 
-    # BULK LOAD: 5 queries for the entire squad 
+    #  BULK LOAD: 5 queries for the entire squad 
     active_players = [p for p in players if not p.is_sold]
 
     # Also include loaned-IN players (belong to other clubs, but cost wages here)
@@ -305,7 +410,7 @@ async def get_ffp_dashboard_by_api_id(
 
     ctx = await _load_squad_context(player_ids, is_sd, viewer_id, viewer_role)
 
-    #  Baseline loop: pure dict lookups, zero DB calls 
+    # Baseline loop: pure dict lookups, zero DB calls 
     baseline_wages = 0.0
     baseline_amort = 0.0
     sources_used: set[str] = set()
@@ -348,7 +453,7 @@ async def get_ffp_dashboard_by_api_id(
     # Build player lookup map for simulation (by api_football_id)
     player_map = {p.api_football_id: p for p in players + loaned_in_players}
 
-    # Simulation overlay 
+    #  Simulation overlay
     sim = None
     net_spend = 0.0
     loan_fee_impact = 0.0
@@ -430,6 +535,24 @@ async def get_ffp_dashboard_by_api_id(
     current_squad_cost = total_wages + total_amort
     current_status_str = ffp_status_from_ratio(current_scr)
 
+    # Per-year wage bills — accounts for expiring contracts, extensions, loan end dates
+    per_year_wages = _compute_yearly_wage_bill(
+        active_players=active_players,
+        loaned_in_players=loaned_in_players,
+        loan_in_by_player=loan_in_by_player,
+        ctx=ctx,
+        is_sd=is_sd,
+        viewer_id=viewer_id,
+        projection_years=3,
+        start_year=start_year,
+    )
+
+    # Apply simulation wage delta to year 1 of per-year projections
+    # (per_year_wages is baseline only; sim buys/sells shift year 1)
+    if per_year_wages and sim:
+        sim_wage_delta = extra_wages - sell_wages  # net wage change from transfers
+        per_year_wages[0] = max(per_year_wages[0] + sim_wage_delta, 0.0)
+
     projections, overall = build_projections(
         base_revenue=annual_revenue,
         base_wage_bill=total_wages,
@@ -439,6 +562,7 @@ async def get_ffp_dashboard_by_api_id(
         projection_years=3,
         start_year=start_year,
         sell_profit_loss_year1=sell_profit_loss,
+        per_year_wage_bills=per_year_wages,
     )
 
     proj_models = [
