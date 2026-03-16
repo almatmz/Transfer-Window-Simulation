@@ -26,7 +26,7 @@ from app.utils.ffp_calculator import (
 _NOW_YEAR = 2026
 
 
-#  Bulk loader 
+# Bulk loader 
 
 class SquadContext:
     """
@@ -197,7 +197,7 @@ async def _load_squad_context(
     )
 
 
-# Player wage helper 
+#  Player wage helper 
 
 def _effective_wage(
     player: Player,
@@ -238,7 +238,7 @@ def _effective_wage(
     return sal, yrs, fee, acq_year, src, extra_amort
 
 
-#  Main FFP function
+#  Main FFP function 
 
 async def get_ffp_dashboard_by_api_id(
     api_football_id: int,
@@ -271,11 +271,41 @@ async def get_ffp_dashboard_by_api_id(
 
     # BULK LOAD: 5 queries for the entire squad 
     active_players = [p for p in players if not p.is_sold]
-    player_ids = [str(p.id) for p in active_players]
+
+    # Also include loaned-IN players (belong to other clubs, but cost wages here)
+    loan_in_deals = await LoanDeal.find({
+        "club_api_football_id": api_football_id,
+        "loan_direction": "in",
+        "is_active": True,
+        "option_exercised": False,
+    }).to_list()
+
+    # Deduplicate: SD deal wins over admin deal for same player
+    loan_in_by_player: dict[str, LoanDeal] = {}
+    for deal in loan_in_deals:
+        if not is_sd and deal.set_by_role != "admin":
+            continue
+        existing = loan_in_by_player.get(deal.player_id)
+        if existing is None:
+            loan_in_by_player[deal.player_id] = deal
+        elif deal.set_by_role == "sport_director" and deal.set_by_user_id == viewer_id:
+            loan_in_by_player[deal.player_id] = deal
+
+    # Fetch loaned-in player documents
+    loaned_in_player_ids = list(loan_in_by_player.keys())
+    loaned_in_players: list[Player] = []
+    if loaned_in_player_ids:
+        import bson
+        loaned_in_players = await Player.find(
+            {"_id": {"$in": [bson.ObjectId(pid) for pid in loaned_in_player_ids]}}
+        ).to_list()
+
+    all_active = active_players + loaned_in_players
+    player_ids = [str(p.id) for p in all_active]
 
     ctx = await _load_squad_context(player_ids, is_sd, viewer_id, viewer_role)
 
-    # Baseline loop: pure dict lookups, zero DB calls 
+    #  Baseline loop: pure dict lookups, zero DB calls 
     baseline_wages = 0.0
     baseline_amort = 0.0
     sources_used: set[str] = set()
@@ -295,10 +325,30 @@ async def get_ffp_dashboard_by_api_id(
             )
         sources_used.add(src)
 
-    # Build player lookup map for simulation (by api_football_id)
-    player_map = {p.api_football_id: p for p in players}
+    # Loaned-in players: add this club's wage contribution to wage bill
+    # (they don't appear in own players, so handle separately)
+    for player in loaned_in_players:
+        pid = str(player.id)
+        deal = loan_in_by_player.get(pid)
+        if not deal:
+            continue
+        # Wage cost = annual_salary * this club's contribution %
+        wage_cost = deal.annual_salary * deal.wage_contribution_pct / 100
+        baseline_wages += wage_cost
+        # Loan fee amortized over contract years if option to buy exists
+        if deal.has_option_to_buy and deal.option_to_buy_fee and deal.option_contract_years:
+            baseline_amort += amortization_for_season(
+                fee=deal.option_to_buy_fee,
+                contract_years=deal.option_contract_years,
+                acquisition_year=deal.loan_start_date.year if deal.loan_start_date else start_year,
+                target_season_year=start_year,
+            )
+        sources_used.add(f"loan_in_{deal.set_by_role}")
 
-    # Simulation overlay───────────────────────────────────────────────────
+    # Build player lookup map for simulation (by api_football_id)
+    player_map = {p.api_football_id: p for p in players + loaned_in_players}
+
+    # Simulation overlay 
     sim = None
     net_spend = 0.0
     loan_fee_impact = 0.0
@@ -373,7 +423,7 @@ async def get_ffp_dashboard_by_api_id(
             loan_fee_impact -= lo.loan_fee_received
             net_spend -= lo.loan_fee_received
 
-    #  Final totals
+    #  Final totals 
     total_wages = max(baseline_wages + extra_wages - sell_wages, 0.0)
     total_amort = max(baseline_amort + extra_amort - sell_amort_relief, 0.0)
     current_scr = squad_cost_ratio_calc(annual_revenue, total_wages, total_amort)

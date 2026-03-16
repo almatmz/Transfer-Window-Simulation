@@ -36,34 +36,47 @@ class Player(Document):
     position: Position = Position.UNKNOWN
     photo_url: str = ""
 
-    # ── Market value from Transfermarkt (Apify)
+    #  Market value from Transfermarkt 
     transfer_value: float = 0.0
     transfer_value_currency: str = "EUR"
     transfer_value_updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    # ── Contract data — sourced from Transfermarkt (Apify) preferred, API-Football fallback
+    # Contract data
     acquisition_fee: float = 0.0
     acquisition_year: int = 0
     contract_signing_date: Optional[date] = None
     contract_expiry_year: int = 0
-    contract_expiry_date: Optional[date] = None    # exact date from Transfermarkt
+    contract_expiry_date: Optional[date] = None
     contract_length_years: int = 0
 
-    # ── Loan status — detected from Transfermarkt transferHistory
+    #  Loan IN — this player is on loan from another club
     is_on_loan: bool = False
-    loan_from_club: Optional[str] = None           # parent club name
-    loan_from_club_id: Optional[str] = None        # Transfermarkt club ID
+    loan_from_club: Optional[str] = None
+    loan_from_club_id: Optional[str] = None
     loan_start_date: Optional[date] = None
     loan_end_date: Optional[date] = None
     loan_fee: Optional[float] = None
+    loan_option_to_buy: bool = False
+    loan_option_to_buy_fee: Optional[float] = None
+    loan_wage_contribution_pct: float = 100.0
+
+    #  Loan OUT — this player has been sent to another club on loan
+    loaned_out: bool = False
+    loaned_out_to_club: Optional[str] = None
+    loaned_out_to_club_id: Optional[str] = None
+    loaned_out_start_date: Optional[date] = None
+    loaned_out_end_date: Optional[date] = None
+    loaned_out_fee: Optional[float] = None
+    loaned_out_option_to_buy: bool = False
+    loaned_out_option_to_buy_fee: Optional[float] = None
+    loaned_out_wage_contribution_pct: float = 100.0
 
     # ── Transfermarkt identifiers
     transfermarkt_url: Optional[str] = None
     transfermarkt_id: Optional[str] = None
-    transfermarkt_synced_at: Optional[str] = None  # ISO string from Apify scrapedAt
+    transfermarkt_synced_at: Optional[str] = None
 
     estimated_annual_salary: float = 0.0
-    # capology_estimate | position_estimate | groq_estimate | sd_override | apify_estimate
     salary_source: str = "position_estimate"
 
     is_sold: bool = False
@@ -80,4 +93,6 @@ class Player(Document):
             "is_sold",
             "transfermarkt_id",
             "is_on_loan",
+            "loaned_out",
+            "loaned_out_to_club_id",
         ]
