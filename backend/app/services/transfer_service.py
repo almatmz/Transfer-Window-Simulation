@@ -4,7 +4,6 @@ import re
 from datetime import datetime
 from fastapi import HTTPException
 
-from app.core.config import settings
 from app.core.security import UserRole
 from app.models.club import Club
 from app.models.player import Player
@@ -27,11 +26,41 @@ from app.utils.amortization import (
 )
 from app.utils.ffp_calculator import (
     build_projections,
-    worst_case_status,
     validate_simulation_year,
 )
 
 _NOW_YEAR = 2026
+
+
+# Helpers 
+
+def _is_sd(user: User) -> bool:
+    return user.role in (UserRole.SPORT_DIRECTOR, UserRole.ADMIN)
+
+
+def _parse_season_year(season: str) -> int:
+    match = re.search(r"(\d{4})", season)
+    return int(match.group(1)) if match else _NOW_YEAR
+
+
+def _check_index(target: list, index: int, label: str) -> None:
+    if index < 0 or index >= len(target):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} index {index} out of range — list has {len(target)} item(s).",
+        )
+
+
+async def _get_sim_and_club(sim_id: str, user: User) -> tuple[TransferSimulation, Club]:
+    sim = await TransferSimulation.get(sim_id)
+    if not sim:
+        raise HTTPException(status_code=404, detail="Simulation not found")
+    if sim.user_id != str(user.id):
+        raise HTTPException(status_code=403, detail="Not your simulation")
+    club = await Club.find_one(Club.api_football_id == sim.club_api_football_id)
+    if not club:
+        raise HTTPException(status_code=404, detail="Club not found — re-sync it")
+    return sim, club
 
 
 #  Serializers 
@@ -82,62 +111,107 @@ def _summary(sim: TransferSimulation) -> SimulationSummary:
     )
 
 
-#  Player financials helper 
+# Bulk financials context 
 
-async def _player_financials(
-    api_football_player_id: int | None,
-    is_sd: bool,
-    viewer_user_id: str | None = None,
-) -> tuple[float, int, float, int]:
+class _FinancialsCtx:
     """
-    Returns (annual_salary, contract_length_years, acquisition_fee, acquisition_year)
-    applying PlayerOverride priority:
-      SD viewer  -> SD own override > Admin override > raw DB
-      Everyone   -> Admin override > raw DB
+    Pre-loads all PlayerOverrides for a squad in 2 bulk queries.
+    Lookup is O(1) dict access — zero extra DB calls in loops.
+    """
+    def __init__(
+        self,
+        admin_map: dict[str, PlayerOverride],
+        sd_map: dict[str, PlayerOverride],
+    ):
+        self._admin = admin_map
+        self._sd = sd_map
+
+    def get(self, player: Player, is_sd: bool, viewer_id: str | None) -> tuple[float, int, float, int]:
+        pid = str(player.id)
+        if is_sd and viewer_id:
+            ov = self._sd.get(pid)
+            if ov:
+                return (
+                    ov.annual_salary or player.estimated_annual_salary,
+                    ov.contract_length_years or player.contract_length_years,
+                    ov.acquisition_fee if ov.acquisition_fee is not None else player.acquisition_fee,
+                    ov.acquisition_year or player.acquisition_year or 0,
+                )
+        ov = self._admin.get(pid)
+        if ov:
+            return (
+                ov.annual_salary or player.estimated_annual_salary,
+                ov.contract_length_years or player.contract_length_years,
+                ov.acquisition_fee if ov.acquisition_fee is not None else player.acquisition_fee,
+                ov.acquisition_year or player.acquisition_year or 0,
+            )
+        return (
+            player.estimated_annual_salary,
+            player.contract_length_years,
+            player.acquisition_fee,
+            player.acquisition_year or 0,
+        )
+
+
+async def _build_ctx(
+    player_ids: list[str], is_sd: bool, viewer_id: str | None
+) -> _FinancialsCtx:
+    if not player_ids:
+        return _FinancialsCtx({}, {})
+
+    admin_list = await PlayerOverride.find(
+        {"player_id": {"$in": player_ids}, "set_by_role": "admin"}
+    ).to_list()
+    admin_map = {ov.player_id: ov for ov in admin_list}
+
+    sd_map: dict[str, PlayerOverride] = {}
+    if is_sd and viewer_id:
+        sd_list = await PlayerOverride.find(
+            {"player_id": {"$in": player_ids},
+             "set_by_user_id": viewer_id,
+             "set_by_role": "sport_director"}
+        ).to_list()
+        sd_map = {ov.player_id: ov for ov in sd_list}
+
+    return _FinancialsCtx(admin_map, sd_map)
+
+
+# Validation 
+
+async def _validate_club_player(
+    api_football_player_id: int | None,
+    club_id: str,
+    operation: str,
+) -> Player | None:
+    """
+    Validates that a player being sold/loaned-out belongs to this simulation's club.
+    Raises 400 if player is from a different club.
+    Returns None if api_football_player_id is not provided (manual entry).
     """
     if not api_football_player_id:
-        return 0.0, 0, 0.0, 0
+        return None
+
     player = await Player.find_one(Player.api_football_id == api_football_player_id)
     if not player:
-        return 0.0, 0, 0.0, 0
-
-    player_id = str(player.id)
-
-    if is_sd and viewer_user_id:
-        sd_ov = await PlayerOverride.find_one(
-            PlayerOverride.player_id == player_id,
-            PlayerOverride.set_by_user_id == viewer_user_id,
-            PlayerOverride.set_by_role == "sport_director",
+        raise HTTPException(
+            status_code=404,
+            detail=f"Player {api_football_player_id} not found. Load their club squad first.",
         )
-        if sd_ov:
-            return (
-                sd_ov.annual_salary or player.estimated_annual_salary,
-                sd_ov.contract_length_years or player.contract_length_years,
-                sd_ov.acquisition_fee if sd_ov.acquisition_fee is not None else player.acquisition_fee,
-                sd_ov.acquisition_year or player.acquisition_year or 0,
-            )
-
-    admin_ov = await PlayerOverride.find_one(
-        PlayerOverride.player_id == player_id,
-        PlayerOverride.set_by_role == "admin",
-    )
-    if admin_ov:
-        return (
-            admin_ov.annual_salary or player.estimated_annual_salary,
-            admin_ov.contract_length_years or player.contract_length_years,
-            admin_ov.acquisition_fee if admin_ov.acquisition_fee is not None else player.acquisition_fee,
-            admin_ov.acquisition_year or player.acquisition_year or 0,
+    if player.club_id != club_id:
+        club = await Club.find_one(Club.id == player.club_id)
+        actual_club = club.name if club else player.club_id
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot {operation} player {player.name} — "
+                f"they belong to {actual_club}, not this simulation's club. "
+                f"You can only sell/loan-out players from your own squad."
+            ),
         )
-
-    return (
-        player.estimated_annual_salary,
-        player.contract_length_years,
-        player.acquisition_fee,
-        player.acquisition_year or 0,
-    )
+    return player
 
 
-#  Core FFP engine 
+# Core FFP engine
 
 async def _recompute(
     club: Club,
@@ -155,75 +229,83 @@ async def _recompute(
     from app.services.club_service import get_effective_revenue
     base_revenue = await get_effective_revenue(club, user_id)
 
-    squad = await Player.find(Player.club_id == str(club.id)).to_list()
+    # Load squad + bulk overrides in 3 queries total
+    squad = await Player.find(
+        Player.club_id == str(club.id),
+        Player.is_sold == False,  # noqa: E712
+    ).to_list()
+    player_ids = [str(p.id) for p in squad]
+    ctx = await _build_ctx(player_ids, is_sd, user_id)
 
+    # Build a map for sell/loan-out lookups
+    player_by_api_id = {p.api_football_id: p for p in squad}
+
+    #  Baseline wages + amortization
     baseline_wages = 0.0
     baseline_amort = 0.0
 
     for p in squad:
-        if p.is_sold:
-            continue
-        # Apply PlayerOverride priority: SD own > Admin > raw DB
-        sal, yrs, fee, acq_yr = await _player_financials(
-            p.api_football_id, is_sd, user_id
-        )
+        sal, yrs, fee, acq_yr = ctx.get(p, is_sd, user_id)
         baseline_wages += sal
         baseline_amort += amortization_for_season(
-            fee=fee,
-            contract_years=yrs,
-            acquisition_year=acq_yr,
-            target_season_year=target_year,
+            fee=fee, contract_years=yrs,
+            acquisition_year=acq_yr, target_season_year=target_year,
         )
 
-    buy_fees = sum(b.transfer_fee for b in buys)
-    buy_wages = sum(b.annual_salary for b in buys)
-    buy_amort = sum(
+    #  Buys 
+    buy_fees   = sum(b.transfer_fee for b in buys)
+    buy_wages  = sum(b.annual_salary for b in buys)
+    buy_amort  = sum(
         calculate_annual_amortization(b.transfer_fee, b.contract_length_years)
         for b in buys
     )
 
-    sell_fees = sum(s.transfer_fee for s in sells)
-    sell_wages = 0.0
+    #  Sells 
+    sell_fees        = sum(s.transfer_fee for s in sells)
+    sell_wages       = 0.0
     sell_amort_relief = 0.0
     sell_profit_loss = 0.0
 
     for s in sells:
-        sal, yrs, fee, acq_year = await _player_financials(s.api_football_player_id, is_sd, user_id)
-        sell_wages += sal if sal else s.annual_salary
-        if fee > 0 and yrs > 0 and acq_year > 0:
+        p = player_by_api_id.get(s.api_football_player_id) if s.api_football_player_id else None
+        if p:
+            sal, yrs, fee, acq_yr = ctx.get(p, is_sd, user_id)
+        else:
+            sal, yrs, fee, acq_yr = s.annual_salary, s.contract_length_years, s.transfer_fee, 0
+
+        sell_wages += sal
+        if fee > 0 and yrs > 0 and acq_yr > 0:
             sell_amort_relief += amortization_for_season(
                 fee=fee, contract_years=yrs,
-                acquisition_year=acq_year, target_season_year=target_year,
+                acquisition_year=acq_yr, target_season_year=target_year,
             )
             sell_profit_loss += book_profit_or_loss(
-                s.transfer_fee, fee, yrs, target_year - acq_year
+                s.transfer_fee, fee, yrs, target_year - acq_yr
             )
         else:
             sell_profit_loss += s.transfer_fee
 
+    #  Loans in 
     loan_fees_paid = sum(li.loan_fee for li in loans_in)
-    loan_in_wages = sum(
-        li.annual_salary * (li.wage_contribution_pct / 100) for li in loans_in
-    )
-    loan_in_amort = sum(
+    loan_in_wages  = sum(li.annual_salary * li.wage_contribution_pct / 100 for li in loans_in)
+    loan_in_amort  = sum(
         calculate_annual_amortization(li.loan_fee, li.contract_length_years)
         for li in loans_in
     )
 
-    loan_fees_recv = sum(lo.loan_fee_received for lo in loans_out)
+    # Loans out 
+    loan_fees_recv  = sum(lo.loan_fee_received for lo in loans_out)
     loan_out_relief = 0.0
-    for lo in loans_out:
-        sal, _, _, _ = await _player_financials(lo.api_football_player_id, is_sd, user_id)
-        full_sal = sal if sal else lo.annual_salary
-        loan_out_relief += full_sal * ((100 - lo.wage_contribution_pct) / 100)
 
-    total_wages = max(
-        baseline_wages + buy_wages - sell_wages + loan_in_wages - loan_out_relief, 0.0
-    )
-    total_amort = max(
-        baseline_amort + buy_amort - sell_amort_relief + loan_in_amort, 0.0
-    )
-    net_spend = buy_fees + loan_fees_paid - sell_fees - loan_fees_recv
+    for lo in loans_out:
+        p = player_by_api_id.get(lo.api_football_player_id) if lo.api_football_player_id else None
+        sal = ctx.get(p, is_sd, user_id)[0] if p else lo.annual_salary
+        loan_out_relief += sal * (100 - lo.wage_contribution_pct) / 100
+
+    # Totals 
+    total_wages = max(baseline_wages + buy_wages - sell_wages + loan_in_wages - loan_out_relief, 0.0)
+    total_amort = max(baseline_amort + buy_amort - sell_amort_relief + loan_in_amort, 0.0)
+    net_spend      = buy_fees + loan_fees_paid - sell_fees - loan_fees_recv
     loan_fee_impact = loan_fees_paid - loan_fees_recv
 
     projections, overall = build_projections(
@@ -274,66 +356,24 @@ async def _save_recomputed(
     return _serialize(sim)
 
 
-#  Auth helpers 
+# CRUD 
 
-async def _get_sim_and_club(
-    sim_id: str, user: User
-) -> tuple[TransferSimulation, Club]:
-    sim = await TransferSimulation.get(sim_id)
-    if not sim:
-        raise HTTPException(status_code=404, detail="Simulation not found")
-    if sim.user_id != str(user.id):
-        raise HTTPException(status_code=403, detail="Not your simulation")
-    club = await Club.find_one(Club.api_football_id == sim.club_api_football_id)
-    if not club:
-        raise HTTPException(
-            status_code=404, detail="Club not found in DB — re-sync it"
-        )
-    return sim, club
-
-
-def _is_sd(user: User) -> bool:
-    return user.role in (UserRole.SPORT_DIRECTOR, UserRole.ADMIN)
-
-
-def _check_index(target: list, index: int, label: str) -> None:
-    if index < 0 or index >= len(target):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"{label} index {index} out of range — "
-                f"list has {len(target)} item(s). Indices are 0-based."
-            ),
-        )
-
-
-#  CRUD 
-
-async def create_simulation(
-    data: SimulationCreateRequest, user: User
-) -> SimulationResponse:
+async def create_simulation(data: SimulationCreateRequest, user: User) -> SimulationResponse:
     club = await Club.find_one(Club.api_football_id == data.club_api_football_id)
     if not club:
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"Club {data.club_api_football_id} not loaded. "
-                f"Call GET /api/v1/clubs/{data.club_api_football_id} first."
-            ),
+            detail=f"Club {data.club_api_football_id} not loaded. "
+                   f"Call GET /api/v1/clubs/{data.club_api_football_id} first.",
         )
-    try:
-        start_year = int(data.season.split("/")[0])
-    except Exception:
-        start_year = club.season_year or _NOW_YEAR
-
+    start_year = _parse_season_year(data.season) if data.season else club.season_year or _NOW_YEAR
     try:
         validate_simulation_year(start_year)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    sd = _is_sd(user)
     computed = await _recompute(
-        club, [], [], [], [], sd,
+        club, [], [], [], [], _is_sd(user),
         start_year=start_year, user_id=str(user.id),
     )
     sim = TransferSimulation(
@@ -355,14 +395,12 @@ async def list_my_simulations(
     season: str | None,
     window_type: WindowType | None,
 ) -> list[SimulationSummary]:
-    sims = await TransferSimulation.find(
-        TransferSimulation.user_id == str(user.id)
-    ).to_list()
+    filters: dict = {"user_id": str(user.id)}
     if season:
-        sims = [s for s in sims if s.season == season]
+        filters["season"] = season
     if window_type:
-        sims = [s for s in sims if s.window_type == window_type]
-    sims.sort(key=lambda s: s.created_at, reverse=True)
+        filters["window_type"] = window_type
+    sims = await TransferSimulation.find(filters).sort("-created_at").to_list()
     return [_summary(s) for s in sims]
 
 
@@ -378,15 +416,10 @@ async def get_simulation(sim_id: str, user: User) -> SimulationResponse:
 async def update_meta(
     sim_id: str, data: UpdateSimulationMetaRequest, user: User
 ) -> SimulationResponse:
-    sim, club = await _get_sim_and_club(sim_id, user)
-    if data.simulation_name:
-        sim.simulation_name = data.simulation_name
-    if data.window_type:
-        sim.window_type = data.window_type
-    if data.season:
-        sim.season = data.season
-    if data.is_public is not None:
-        sim.is_public = data.is_public
+    sim, _ = await _get_sim_and_club(sim_id, user)
+    updates = data.model_dump(exclude_unset=True)
+    for k, v in updates.items():
+        setattr(sim, k, v)
     sim.updated_at = datetime.utcnow()
     await sim.save()
     return _serialize(sim)
@@ -402,7 +435,7 @@ async def delete_simulation(sim_id: str, user: User) -> dict:
     return {"message": "Simulation deleted"}
 
 
-# Add transfers
+#  Add transfers 
 
 async def add_buy(sim_id: str, data: AddBuyRequest, user: User) -> SimulationResponse:
     sim, club = await _get_sim_and_club(sim_id, user)
@@ -412,27 +445,35 @@ async def add_buy(sim_id: str, data: AddBuyRequest, user: User) -> SimulationRes
 
 async def add_sell(sim_id: str, data: AddSellRequest, user: User) -> SimulationResponse:
     sim, club = await _get_sim_and_club(sim_id, user)
+    # Validate player belongs to this club
+    await _validate_club_player(data.api_football_player_id, str(club.id), "sell")
     sim.sells.append(SellEntry(**data.model_dump()))
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-async def add_loan_in(
-    sim_id: str, data: AddLoanInRequest, user: User
-) -> SimulationResponse:
+async def add_loan_in(sim_id: str, data: AddLoanInRequest, user: User) -> SimulationResponse:
     sim, club = await _get_sim_and_club(sim_id, user)
     sim.loans_in.append(LoanInEntry(**data.model_dump()))
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-async def add_loan_out(
-    sim_id: str, data: AddLoanOutRequest, user: User
-) -> SimulationResponse:
+async def add_loan_out(sim_id: str, data: AddLoanOutRequest, user: User) -> SimulationResponse:
     sim, club = await _get_sim_and_club(sim_id, user)
+    # Validate player belongs to this club
+    await _validate_club_player(data.api_football_player_id, str(club.id), "loan out")
     sim.loans_out.append(LoanOutEntry(**data.model_dump()))
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-#  Update transfers (PATCH by index) 
+# Update transfers 
+
+_ENTRY_CLASSES = {
+    "buys": BuyEntry,
+    "sells": SellEntry,
+    "loans_in": LoanInEntry,
+    "loans_out": LoanOutEntry,
+}
+
 
 async def update_transfer(
     sim_id: str,
@@ -441,32 +482,24 @@ async def update_transfer(
     data: UpdateBuyRequest | UpdateSellRequest | UpdateLoanInRequest | UpdateLoanOutRequest,
     user: User,
 ) -> SimulationResponse:
-    """
-    Patch any field(s) of an existing transfer entry by its list index.
-    Only the fields you send are updated — everything else stays the same.
-    FFP is fully recomputed after the change.
-    """
     sim, club = await _get_sim_and_club(sim_id, user)
     target: list = getattr(sim, list_name)
     _check_index(target, index, list_name)
 
-    current = target[index].model_dump()
-    updates = data.model_dump(exclude_unset=True)
-    current.update(updates)
+    # For sells/loan-outs, validate club ownership if player id is being changed
+    if list_name in ("sells", "loans_out"):
+        new_pid = data.model_dump(exclude_unset=True).get("api_football_player_id")
+        if new_pid:
+            op = "sell" if list_name == "sells" else "loan out"
+            await _validate_club_player(new_pid, str(club.id), op)
 
-    entry_map = {
-        "buys": BuyEntry,
-        "sells": SellEntry,
-        "loans_in": LoanInEntry,
-        "loans_out": LoanOutEntry,
-    }
-    EntryClass = entry_map[list_name]
-    target[index] = EntryClass(**current)
+    merged = {**target[index].model_dump(), **data.model_dump(exclude_unset=True)}
+    target[index] = _ENTRY_CLASSES[list_name](**merged)
     setattr(sim, list_name, target)
-
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
+# Remove transfers 
 
 async def remove_transfer(
     sim_id: str, list_name: str, index: int, user: User
@@ -481,146 +514,77 @@ async def remove_transfer(
 
 #  Simulation squad projection 
 
-def _parse_season_year(season: str) -> int:
-    """
-    Parse a season string to its start year.
-
-    Examples:
-      "2025/26"         → 2025
-      "2026/27"         → 2026
-      "2027/28 Winter"  → 2027
-    """
-    match = re.search(r"(\d{4})", season)
-    return int(match.group(1)) if match else _NOW_YEAR
-
-
-async def get_simulation_squad_projection(
-    sim_id: str,
-    viewer: User,
-) -> dict:
+async def get_simulation_squad_projection(sim_id: str, viewer: User) -> dict:
     """
     Returns the projected squad for the simulation's target season.
-
-    Steps:
-      1. Load simulation (ownership check — user can only see their own).
-      2. Parse simulation.season → target_year (e.g. "2027/28" → 2027).
-      3. Build effective base squad for target_year via get_effective_squad().
-         (Players whose contracts expired before target_year are OUT.)
-      4. Apply simulation transfers on top:
-           buys      → ADD to squad
-           sells     → REMOVE from squad
-           loans_in  → ADD (marked is_on_loan=True)
-           loans_out → REMOVE
-      5. Return merged squad with metadata.
-
-    Important: users CANNOT modify the base squad; they only see:
-      - Remaining real players (post-expiry + admin squad overrides)
-      - Their own simulated transfers added on top
+    Base squad → apply expiry filter → apply sim transfers on top.
     """
     from app.services.squad_override_service import get_effective_squad
 
-    # ── 1. Load simulation
     sim = await TransferSimulation.get(sim_id)
     if not sim:
         raise HTTPException(status_code=404, detail="Simulation not found")
     if sim.user_id != str(viewer.id) and not sim.is_public:
-        raise HTTPException(
-            status_code=403, detail="This simulation is private"
-        )
+        raise HTTPException(status_code=403, detail="This simulation is private")
 
-    #  2. Determine target season year 
     target_year = _parse_season_year(sim.season)
-
-    #3. Effective base squad for that season 
     viewer_role = viewer.role.value
+
     base = await get_effective_squad(
         club_api_football_id=sim.club_api_football_id,
         view_season=target_year,
         viewer_id=str(viewer.id),
         viewer_role=viewer_role,
     )
+    players: list[dict] = list(base["players"])
 
-    players: list[dict] = list(base["players"])   # mutable copy
+    # IDs to remove
+    sell_ids    = {s.api_football_player_id for s in sim.sells    if s.api_football_player_id}
+    loan_out_ids = {lo.api_football_player_id for lo in sim.loans_out if lo.api_football_player_id}
+    remove_ids  = sell_ids | loan_out_ids
+    players     = [p for p in players if p.get("api_football_id") not in remove_ids]
 
-    # Index by api_football_id for fast lookup/removal
-    def _keyed(squad: list[dict]) -> dict[int | None, dict]:
-        return {p.get("api_football_id"): p for p in squad if p.get("api_football_id")}
-
-    active_ids: set[int] = {
-        p["api_football_id"]
-        for p in players
-        if p.get("api_football_id") is not None
-    }
-
-    # ── 4a. Apply SELLS (remove from squad) 
-    sell_ids: set[int] = set()
-    for sell in sim.sells:
-        if sell.api_football_player_id:
-            sell_ids.add(sell.api_football_player_id)
-    players = [p for p in players if p.get("api_football_id") not in sell_ids]
-    active_ids -= sell_ids
-
-    #  4b. Apply LOANS OUT (remove from squad) 
-    loan_out_ids: set[int] = set()
-    for lo in sim.loans_out:
-        if lo.api_football_player_id:
-            loan_out_ids.add(lo.api_football_player_id)
-    players = [p for p in players if p.get("api_football_id") not in loan_out_ids]
-    active_ids -= loan_out_ids
-
-    #  4c. Apply BUYS (add to squad)
-    simulated_buys: list[dict] = []
-    for buy in sim.buys:
-        entry = {
-            "id": None,
-            "api_football_id": buy.api_football_player_id,
-            "name": buy.player_name,
-            "full_name": buy.player_name,
-            "age": buy.age if hasattr(buy, "age") else None,
-            "date_of_birth": None,
-            "nationality": buy.nationality if hasattr(buy, "nationality") else "",
-            "position": buy.position if hasattr(buy, "position") else "UNKNOWN",
-            "photo_url": "",
-            "transfer_value": buy.transfer_fee,
+    # Buys
+    simulated_buys = [
+        {
+            "id": None, "api_football_id": b.api_football_player_id,
+            "name": b.player_name, "full_name": b.player_name,
+            "position": getattr(b, "position", "UNKNOWN"),
+            "nationality": getattr(b, "nationality", ""),
+            "age": getattr(b, "age", None),
+            "transfer_value": b.transfer_fee,
             "transfer_value_currency": "EUR",
-            "estimated_annual_salary": buy.annual_salary,
+            "estimated_annual_salary": b.annual_salary,
             "salary_source": "simulation",
-            "contract_expiry_year": 0,
-            "contract_length_years": buy.contract_length_years,
-            "is_on_loan": False,
-            "loan_from_club": None,
-            "transfermarkt_url": None,
-            "source": "simulation:buy",
+            "contract_length_years": b.contract_length_years,
+            "is_on_loan": False, "squad_loan_status": None,
+            "data_source": "simulation:buy",
         }
-        simulated_buys.append(entry)
-    players.extend(simulated_buys)
+        for b in sim.buys
+    ]
 
-    # ── 4d. Apply LOANS IN (add to squad, marked as loan) ────────────────────
-    simulated_loans_in: list[dict] = []
-    for li in sim.loans_in:
-        entry = {
-            "id": None,
-            "api_football_id": li.api_football_player_id,
-            "name": li.player_name,
-            "full_name": li.player_name,
-            "age": li.age if hasattr(li, "age") else None,
-            "date_of_birth": None,
-            "nationality": li.nationality if hasattr(li, "nationality") else "",
-            "position": li.position if hasattr(li, "position") else "UNKNOWN",
-            "photo_url": "",
-            "transfer_value": 0.0,
-            "transfer_value_currency": "EUR",
-            "estimated_annual_salary": li.annual_salary * (li.wage_contribution_pct / 100),
+    # Loans in
+    simulated_loans_in = [
+        {
+            "id": None, "api_football_id": li.api_football_player_id,
+            "name": li.player_name, "full_name": li.player_name,
+            "position": getattr(li, "position", "UNKNOWN"),
+            "nationality": getattr(li, "nationality", ""),
+            "age": getattr(li, "age", None),
+            "transfer_value": 0.0, "transfer_value_currency": "EUR",
+            "estimated_annual_salary": li.annual_salary * li.wage_contribution_pct / 100,
             "salary_source": "simulation",
-            "contract_expiry_year": 0,
             "contract_length_years": li.contract_length_years,
             "is_on_loan": True,
-            "loan_from_club": li.from_club if hasattr(li, "from_club") else None,
+            "loan_from_club": getattr(li, "from_club", None),
             "loan_fee": li.loan_fee,
-            "transfermarkt_url": None,
-            "source": "simulation:loan_in",
+            "squad_loan_status": "loan_in",
+            "data_source": "simulation:loan_in",
         }
-        simulated_loans_in.append(entry)
+        for li in sim.loans_in
+    ]
+
+    players.extend(simulated_buys)
     players.extend(simulated_loans_in)
 
     return {

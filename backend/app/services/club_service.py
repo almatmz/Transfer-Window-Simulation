@@ -1,14 +1,3 @@
-"""
-club_service.py
-
-Squad sync pipeline order (strict, faster sources first):
-  1. API-Football  → squad list: names, positions, ages, basic contract
-  2. Capology      → salary estimates  (scraped once per club)
-  3. Apify TM      → enrich ALL players in ONE batch call
-                     (market values, exact contract dates, loan status)
-  4. Groq/Gemini   → ONLY for fields still missing after steps 1–3
-                     (max 3 concurrent AI calls via semaphore)
-"""
 from __future__ import annotations
 
 import asyncio
@@ -37,9 +26,7 @@ logger = logging.getLogger(__name__)
 _NOW_YEAR = 2026
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _s(val) -> str:
     return str(val) if val is not None else ""
@@ -88,13 +75,21 @@ async def _get_user_revenue(user_id: str, club_api_id: int) -> float:
 
 async def get_effective_revenue(club: Club, user_id: str | None) -> float:
     """
-    Returns the revenue to use in FFP calculations for a specific user.
-    Priority: official (SD/Admin) > personal override > 0
+    Returns the revenue to use in FFP calculations for a specific viewer.
+ 
+    Priority:
+      1. User's own override  — if they've set one, it always wins for them
+      2. Official revenue     — set by Admin/SD, default for everyone else
+      3. 0                    — nothing configured
     """
+    if user_id:
+        user_rev = await _get_user_revenue(user_id, club.api_football_id)
+        if user_rev > 0:
+            return user_rev
+ 
     if club.official_annual_revenue > 0:
         return club.official_annual_revenue
-    if user_id:
-        return await _get_user_revenue(user_id, club.api_football_id)
+ 
     return 0.0
 
 
@@ -152,9 +147,7 @@ def _map_position(pos: str) -> Position:
     return mapping.get(pos, Position.UNKNOWN)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Search / get club
-# ──────────────────────────────────────────────────────────────────────────────
 
 async def search_clubs(query: str, country: str = "") -> list[ClubSearchResult]:
     results = await api_football.search_clubs(query, country)
@@ -429,7 +422,7 @@ async def sync_squad(club: Club, season: int = 2025) -> int:
             "club_id": str(club.id),
             "estimated_annual_salary": salary,
             "salary_source": salary_source,
-            "contract_expiry_year": contract_expiry_year,
+            "contract_expiry_year": contract_expiry_year,   
             "contract_expiry_date": contract_expiry_date,
             "contract_length_years": contract_length_years,
             "contract_signing_date": contract_signing_date,

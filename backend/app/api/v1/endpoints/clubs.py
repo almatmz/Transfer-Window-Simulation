@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.schemas.club import ClubResponse, ClubRevenueUpdate
-from app.services import club_service, player_service
+from app.services import club_service
 from app.services.squad_override_service import get_effective_squad
 from app.core.deps import get_optional_user, require_sport_director, require_user
 from app.models.user import User
@@ -13,10 +13,13 @@ router = APIRouter(prefix="/clubs", tags=["Clubs"])
     response_model=ClubResponse,
     summary="Get club profile",
     description="""
-Returns club profile. The `annual_revenue` field is personalised:
-- **Admin/Sport Director** set revenue → shown to **everyone** (`revenue_source: official`)
-- **You** have set a personal revenue override → shown only to **you** (`revenue_source: user_override`)
-- Not configured → `annual_revenue: 0`, `revenue_source: none`
+Returns club profile with personalised revenue:
+
+| Viewer | Revenue shown |
+|--------|--------------|
+| **Guest** | Official revenue (if set by admin) or 0 |
+| **User** | Their personal override (if set), else official, else 0 |
+| **Admin/SD** | Official revenue they control |
 """,
 )
 async def get_club(
@@ -34,29 +37,22 @@ async def get_club(
     description="""
 Returns the **base squad** for a given season.
 
-**`view_season`** (default: 2026):
-- Players whose `contract_expiry_year > 0` AND `contract_expiry_year < view_season`
-  are moved to `expired_contracts` — they are no longer in the squad for that season.
-- Example: `?view_season=2028` removes anyone whose contract expired before 2028.
+`view_season` (default: 2026): players whose contracts expired before this year
+are moved to `expired_contracts`.
 
-**Role visibility:**
-- Regular users see the squad + admin squad overrides (read-only).
-- Sport Directors / Admins also see their own private squad overrides.
-- To see your **simulated** squad (with your transfer moves applied), use
-  `GET /api/v1/transfers/simulations/{sim_id}/squad`.
+Players loaned IN from other clubs appear with `squad_loan_status: "loan_in"`.
+Players loaned OUT appear with `squad_loan_status: "loan_out"` (still in squad).
 """,
 )
 async def get_squad(
     api_football_id: int,
     view_season: int = Query(
         default=2026,
-        description="Season year to project (e.g. 2027 for the 2027/28 season). "
-                    "Players with contracts expired before this year are excluded.",
+        description="Season year to project. Players with expired contracts excluded.",
     ),
     viewer: User | None = Depends(get_optional_user),
 ):
     from app.models.club import Club
-
     club = await Club.find_one(Club.api_football_id == api_football_id)
     if not club:
         await club_service.get_or_sync_club(api_football_id)
@@ -64,7 +60,7 @@ async def get_squad(
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
 
-    viewer_id = str(viewer.id) if viewer else None
+    viewer_id   = str(viewer.id) if viewer else None
     viewer_role = viewer.role.value if viewer else "anonymous"
 
     squad_data = await get_effective_squad(
@@ -73,6 +69,7 @@ async def get_squad(
         viewer_id=viewer_id,
         viewer_role=viewer_role,
     )
+    is_sd = viewer and viewer.role.value in ("admin", "sport_director")
 
     return {
         "club_id": str(club.id),
@@ -84,15 +81,8 @@ async def get_squad(
         "total_players": len(squad_data["players"]),
         "admin_additions": squad_data["admin_additions"],
         "admin_removals": squad_data["admin_removals"],
-        # SD metadata only shown to SD / Admin viewers
-        **(
-            {
-                "sd_additions": squad_data["sd_additions"],
-                "sd_removals": squad_data["sd_removals"],
-            }
-            if viewer and viewer.role.value in ("admin", "sport_director")
-            else {}
-        ),
+        **({"sd_additions": squad_data["sd_additions"],
+            "sd_removals": squad_data["sd_removals"]} if is_sd else {}),
         "data_sources": ["api_football", "capology", "apify_transfermarkt"],
     }
 
@@ -102,12 +92,14 @@ async def get_squad(
     response_model=ClubResponse,
     summary="Set revenue for FFP calculations",
     description="""
-**Role behaviour — strictly isolated:**
+Sets revenue for this club used in your FFP calculations.
 
-| Role | What happens |
-|------|-------------|
-| **Admin / Sport Director** | Sets the **official** club revenue — visible to ALL users. Cannot be overridden by users. |
-| **Authenticated User** | Saves a **personal** revenue estimate — stored only for you, invisible to others. If official revenue exists, yours is ignored in FFP but kept for your reference. |
+| Role | Effect |
+|------|--------|
+| **Admin / Sport Director** | Sets **official** revenue — visible to everyone |
+| **Authenticated User** | Saves a **personal** estimate — only visible to you. If official revenue exists, FFP uses official instead. |
+
+Guests cannot set revenue.
 """,
 )
 async def update_revenue(
@@ -130,7 +122,6 @@ async def force_sync(
     user: User = Depends(require_sport_director),
 ):
     from app.models.club import Club
-
     club = await Club.find_one(Club.api_football_id == api_football_id)
     if not club:
         raise HTTPException(status_code=404, detail="Club not found")
