@@ -32,7 +32,7 @@ from app.utils.ffp_calculator import (
 _NOW_YEAR = 2026
 
 
-# Helpers 
+# Helpers
 
 def _is_sd(user: User) -> bool:
     return user.role in (UserRole.SPORT_DIRECTOR, UserRole.ADMIN)
@@ -111,7 +111,7 @@ def _summary(sim: TransferSimulation) -> SimulationSummary:
     )
 
 
-# Bulk financials context 
+#  Bulk financials context 
 
 class _FinancialsCtx:
     """
@@ -211,7 +211,7 @@ async def _validate_club_player(
     return player
 
 
-# Core FFP engine
+#  Core FFP engine 
 
 async def _recompute(
     club: Club,
@@ -252,7 +252,7 @@ async def _recompute(
             acquisition_year=acq_yr, target_season_year=target_year,
         )
 
-    #  Buys 
+    #  Buys
     buy_fees   = sum(b.transfer_fee for b in buys)
     buy_wages  = sum(b.annual_salary for b in buys)
     buy_amort  = sum(
@@ -260,7 +260,7 @@ async def _recompute(
         for b in buys
     )
 
-    #  Sells 
+    # Sells 
     sell_fees        = sum(s.transfer_fee for s in sells)
     sell_wages       = 0.0
     sell_amort_relief = 0.0
@@ -285,7 +285,7 @@ async def _recompute(
         else:
             sell_profit_loss += s.transfer_fee
 
-    #  Loans in 
+    #  Loans in
     loan_fees_paid = sum(li.loan_fee for li in loans_in)
     loan_in_wages  = sum(li.annual_salary * li.wage_contribution_pct / 100 for li in loans_in)
     loan_in_amort  = sum(
@@ -302,7 +302,7 @@ async def _recompute(
         sal = ctx.get(p, is_sd, user_id)[0] if p else lo.annual_salary
         loan_out_relief += sal * (100 - lo.wage_contribution_pct) / 100
 
-    # Totals 
+    # Totals
     total_wages = max(baseline_wages + buy_wages - sell_wages + loan_in_wages - loan_out_relief, 0.0)
     total_amort = max(baseline_amort + buy_amort - sell_amort_relief + loan_in_amort, 0.0)
     net_spend      = buy_fees + loan_fees_paid - sell_fees - loan_fees_recv
@@ -356,7 +356,7 @@ async def _save_recomputed(
     return _serialize(sim)
 
 
-# CRUD 
+#CRUD 
 
 async def create_simulation(data: SimulationCreateRequest, user: User) -> SimulationResponse:
     club = await Club.find_one(Club.api_football_id == data.club_api_football_id)
@@ -465,7 +465,7 @@ async def add_loan_out(sim_id: str, data: AddLoanOutRequest, user: User) -> Simu
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-# Update transfers 
+#  Update transfers 
 
 _ENTRY_CLASSES = {
     "buys": BuyEntry,
@@ -499,7 +499,7 @@ async def update_transfer(
     return await _save_recomputed(sim, club, _is_sd(user), str(user.id))
 
 
-# Remove transfers 
+#  Remove transfers 
 
 async def remove_transfer(
     sim_id: str, list_name: str, index: int, user: User
@@ -516,8 +516,20 @@ async def remove_transfer(
 
 async def get_simulation_squad_projection(sim_id: str, viewer: User) -> dict:
     """
-    Returns the projected squad for the simulation's target season.
-    Base squad → apply expiry filter → apply sim transfers on top.
+    Returns the full simulated squad for display — every player tagged with sim_status.
+
+    sim_status values:
+      null          — regular squad member, unaffected by simulation
+      "sold"        — sold in this simulation (shown greyed out / crossed out)
+      "loaned_out"  — loaned out (shown with wage contribution % and fee received)
+      "bought"      — purchased in this simulation (shown with transfer fee paid)
+      "loan_in"     — loaned in (shown with loan fee and wage contribution)
+
+    FFP impact is computed separately in ffp_service — this endpoint is purely
+    for squad display. The frontend decides how to render each sim_status.
+
+    sold / loaned_out players ARE included so the frontend can show them with
+    visual markers. Their financial impact is reflected in the FFP numbers.
     """
     from app.services.squad_override_service import get_effective_squad
 
@@ -528,64 +540,130 @@ async def get_simulation_squad_projection(sim_id: str, viewer: User) -> dict:
         raise HTTPException(status_code=403, detail="This simulation is private")
 
     target_year = _parse_season_year(sim.season)
-    viewer_role = viewer.role.value
 
     base = await get_effective_squad(
         club_api_football_id=sim.club_api_football_id,
         view_season=target_year,
         viewer_id=str(viewer.id),
-        viewer_role=viewer_role,
+        viewer_role=viewer.role.value,
     )
-    players: list[dict] = list(base["players"])
 
-    # IDs to remove
-    sell_ids    = {s.api_football_player_id for s in sim.sells    if s.api_football_player_id}
-    loan_out_ids = {lo.api_football_player_id for lo in sim.loans_out if lo.api_football_player_id}
-    remove_ids  = sell_ids | loan_out_ids
-    players     = [p for p in players if p.get("api_football_id") not in remove_ids]
+    # Build lookup maps for simulation entries (by api_football_player_id)
+    sell_map: dict[int, SellEntry] = {
+        s.api_football_player_id: s
+        for s in sim.sells if s.api_football_player_id
+    }
+    loan_out_map: dict[int, LoanOutEntry] = {
+        lo.api_football_player_id: lo
+        for lo in sim.loans_out if lo.api_football_player_id
+    }
 
-    # Buys
-    simulated_buys = [
+    #  Tag every base squad player with their sim_status 
+    tagged_squad: list[dict] = []
+    for p in base["players"]:
+        pid = p.get("api_football_id")
+        if pid in sell_map:
+            sell = sell_map[pid]
+            tagged_squad.append({
+                **p,
+                "sim_status": "sold",
+                "sim_transfer_fee": sell.transfer_fee,
+                "sim_annual_salary": p.get("estimated_annual_salary", 0),
+                "sim_note": f"Sold for €{sell.transfer_fee/1e6:.1f}M",
+            })
+        elif pid in loan_out_map:
+            lo = loan_out_map[pid]
+            effective_salary = p.get("estimated_annual_salary", lo.annual_salary)
+            wage_relief = effective_salary * lo.wage_contribution_pct / 100
+            tagged_squad.append({
+                **p,
+                "sim_status": "loaned_out",
+                "sim_loan_fee_received": lo.loan_fee_received,
+                "sim_wage_contribution_pct": lo.wage_contribution_pct,
+                "sim_wage_relief": wage_relief,          # amount receiving club pays
+                "sim_wage_remaining": effective_salary - wage_relief,  # your cost
+                "sim_to_club": getattr(lo, "to_club", None),
+                "sim_note": (
+                    f"Loaned out — receiving club pays {lo.wage_contribution_pct:.0f}% wages"
+                ),
+            })
+        else:
+            tagged_squad.append({**p, "sim_status": None})
+
+    # ── Bought players ──────────────────────────────────────────────────────
+    bought: list[dict] = [
         {
-            "id": None, "api_football_id": b.api_football_player_id,
-            "name": b.player_name, "full_name": b.player_name,
+            "id": None,
+            "api_football_id": b.api_football_player_id,
+            "name": b.player_name,
+            "full_name": b.player_name,
             "position": getattr(b, "position", "UNKNOWN"),
             "nationality": getattr(b, "nationality", ""),
             "age": getattr(b, "age", None),
+            "photo_url": "",
             "transfer_value": b.transfer_fee,
             "transfer_value_currency": "EUR",
             "estimated_annual_salary": b.annual_salary,
             "salary_source": "simulation",
             "contract_length_years": b.contract_length_years,
-            "is_on_loan": False, "squad_loan_status": None,
+            "contract_expiry_year": target_year + b.contract_length_years,
+            "is_on_loan": False,
+            "squad_loan_status": None,
             "data_source": "simulation:buy",
+            # Simulation-specific fields
+            "sim_status": "bought",
+            "sim_transfer_fee": b.transfer_fee,
+            "sim_annual_amortization": (
+                b.transfer_fee / b.contract_length_years
+                if b.contract_length_years > 0 else 0.0
+            ),
+            "sim_note": f"Bought for €{b.transfer_fee/1e6:.1f}M",
         }
         for b in sim.buys
     ]
 
-    # Loans in
-    simulated_loans_in = [
+    # ── Loaned-in players ───────────────────────────────────────────────────
+    loaned_in: list[dict] = [
         {
-            "id": None, "api_football_id": li.api_football_player_id,
-            "name": li.player_name, "full_name": li.player_name,
+            "id": None,
+            "api_football_id": li.api_football_player_id,
+            "name": li.player_name,
+            "full_name": li.player_name,
             "position": getattr(li, "position", "UNKNOWN"),
             "nationality": getattr(li, "nationality", ""),
             "age": getattr(li, "age", None),
-            "transfer_value": 0.0, "transfer_value_currency": "EUR",
-            "estimated_annual_salary": li.annual_salary * li.wage_contribution_pct / 100,
+            "photo_url": "",
+            "transfer_value": 0.0,
+            "transfer_value_currency": "EUR",
+            "estimated_annual_salary": li.annual_salary,
             "salary_source": "simulation",
             "contract_length_years": li.contract_length_years,
+            "contract_expiry_year": 0,
             "is_on_loan": True,
-            "loan_from_club": getattr(li, "from_club", None),
-            "loan_fee": li.loan_fee,
             "squad_loan_status": "loan_in",
+            "loan_from_club": getattr(li, "from_club", None),
             "data_source": "simulation:loan_in",
+            # Simulation-specific fields
+            "sim_status": "loan_in",
+            "sim_loan_fee_paid": li.loan_fee,
+            "sim_wage_contribution_pct": li.wage_contribution_pct,
+            "sim_wage_cost": li.annual_salary * li.wage_contribution_pct / 100,
+            "sim_note": (
+                f"Loaned in — paying {li.wage_contribution_pct:.0f}% of wages"
+            ),
         }
         for li in sim.loans_in
     ]
 
-    players.extend(simulated_buys)
-    players.extend(simulated_loans_in)
+    # Full squad = tagged base + bought + loaned_in
+    # (sold/loaned_out remain in tagged_squad with their sim_status flag)
+    all_players = tagged_squad + bought + loaned_in
+
+    # Counts for summary
+    active_count = sum(
+        1 for p in all_players
+        if p["sim_status"] not in ("sold", "loaned_out")
+    )
 
     return {
         "simulation_id": sim_id,
@@ -594,13 +672,17 @@ async def get_simulation_squad_projection(sim_id: str, viewer: User) -> dict:
         "target_year": target_year,
         "club_api_football_id": sim.club_api_football_id,
         "club_name": sim.club_name,
-        "players": players,
-        "total_players": len(players),
+        # All players — frontend filters/styles by sim_status
+        "players": all_players,
+        # Counts
+        "total_active_players": active_count,
+        "total_sold": len(sell_map),
+        "total_loaned_out": len(loan_out_map),
+        "total_bought": len(bought),
+        "total_loaned_in": len(loaned_in),
+        # Expired contracts from base squad (pre-simulation)
         "expired_contracts": base["expired_contracts"],
-        "simulated_buys": simulated_buys,
-        "simulated_loans_in": simulated_loans_in,
-        "simulated_sell_ids": list(sell_ids),
-        "simulated_loan_out_ids": list(loan_out_ids),
+        # Admin squad overrides applied to base
         "admin_additions": base["admin_additions"],
         "admin_removals": base["admin_removals"],
     }

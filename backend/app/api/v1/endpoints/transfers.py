@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
+from app.core.deps import get_current_user
 from app.schemas.transfer import (
     SimulationCreateRequest, SimulationResponse, SimulationSummary,
     AddBuyRequest, AddSellRequest, AddLoanInRequest, AddLoanOutRequest,
@@ -111,3 +112,40 @@ async def update_loan_out(sim_id: str, index: int, body: UpdateLoanOutRequest, u
 @router.delete("/{sim_id}/loans-out/{index}", response_model=SimulationResponse, summary="Remove a loan-out by index (0-based)")
 async def remove_loan_out(sim_id: str, index: int, user: User = Depends(require_user)):
     return await transfer_service.remove_transfer(sim_id, "loans_out", index, user)
+
+
+@router.get(
+    "/simulations/{sim_id}/squad",
+    summary="Get simulated squad with all transfers applied",
+    description="""
+Returns the projected squad for this simulation's target season.
+ 
+**Three endpoints — three views:**
+ 
+| Endpoint | What you see |
+|----------|-------------|
+| `GET /clubs/{id}/squad` | Real squad, no simulation |
+| `GET /squad-overrides/clubs/{id}/effective` | Real squad + admin/SD overrides |
+| `GET /transfers/simulations/{id}/squad` | ← **This endpoint**: overridden squad + your transfers |
+ 
+**Every player has a `sim_status` field:**
+- `null` — unaffected squad member
+- `"sold"` — sold in this simulation (shown with sale fee)
+- `"loaned_out"` — loaned out (shown with wage contribution %)
+- `"bought"` — purchased in this simulation (shown with transfer fee)
+- `"loan_in"` — loaned in (shown with loan fee and wage cost)
+ 
+Sold and loaned-out players are **included** in the response so the frontend
+can display them with visual markers — they are already excluded from
+FFP calculations in the simulation engine.
+ 
+**Auth:** Only the simulation owner can access their private simulations.
+Public simulations are visible to everyone.
+""",
+)
+async def get_simulation_squad(
+    sim_id: str,
+    viewer: User = Depends(get_current_user),
+):
+    return await transfer_service.get_simulation_squad_projection(sim_id, viewer)
+ 
