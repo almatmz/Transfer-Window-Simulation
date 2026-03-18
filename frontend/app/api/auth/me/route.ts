@@ -1,9 +1,10 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from "next/server";
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_ORIGIN || 'http://localhost:8000';
+const BACKEND =
+  process.env.NEXT_PUBLIC_BACKEND_ORIGIN || "http://localhost:8000";
 
 export async function GET(req: NextRequest) {
-  const auth = req.headers.get('Authorization') ?? '';
+  const auth = req.headers.get("Authorization") ?? "";
   const res = await fetch(`${BACKEND}/api/v1/auth/me`, {
     headers: { Authorization: auth },
   });

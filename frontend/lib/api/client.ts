@@ -33,7 +33,7 @@ export const CURRENT_SEASON =
     ? new Date().getFullYear()
     : new Date().getFullYear() - 1;
 
-//  Token storage (memory + sessionStorage)
+// Token storage (memory + sessionStorage)
 let _at: string | null = null;
 let _rt: string | null = null;
 let _refreshing: Promise<boolean> | null = null;
@@ -70,7 +70,7 @@ export const getRefreshToken = (): string | null => {
 };
 export const isAuthenticated = () => !!getAccessToken();
 
-//  Core fetch with auto-refresh
+// Core fetch with auto-refresh
 async function tryRefresh(): Promise<boolean> {
   if (_refreshing) return _refreshing;
   return (_refreshing = (async () => {
@@ -174,7 +174,7 @@ export const authApi = {
     }),
 };
 
-//  Search
+// Search
 export const searchApi = {
   clubs: (q: string, country = "") =>
     apiFetch<ClubSearchResult[]>(
@@ -182,7 +182,7 @@ export const searchApi = {
     ),
 };
 
-//  Clubs
+// Clubs
 export const clubsApi = {
   get: (id: number, season = CURRENT_SEASON) =>
     apiFetch<ClubResponse>(`/clubs/${id}?season=${season}`),
@@ -236,7 +236,7 @@ export const playersApi = {
     apiFetch<void>(`/players/${id}/contract-extension`, { method: "DELETE" }),
 };
 
-//  Squad Overrides
+// Squad Overrides
 export const squadOverridesApi = {
   list: (clubId: number) =>
     apiFetch<SquadOverrideResponse[]>(`/squad-overrides/clubs/${clubId}`),
@@ -253,7 +253,7 @@ export const squadOverridesApi = {
     ),
 };
 
-//  Simulations
+// Simulations
 export const simulationsApi = {
   create: (b: SimulationCreateRequest) =>
     apiFetch<SimulationResponse>("/simulations/", {
@@ -325,6 +325,9 @@ export const simulationsApi = {
     apiFetch<SimulationResponse>(`/simulations/${id}/loans-out/${i}`, {
       method: "DELETE",
     }),
+  /** Simulated squad — club squad with all simulation transfers applied */
+  getSimulatedSquad: (simId: string) =>
+    apiFetch<SquadResponse>(`/simulations/simulations/${simId}/squad`),
 };
 
 //  FFP

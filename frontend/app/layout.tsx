@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
 import { Navbar } from "@/components/layout/Navbar";
+import { Footer } from "@/components/layout/Footer";
 import { Toaster } from "sonner";
 
 export const metadata: Metadata = {
@@ -24,7 +25,10 @@ export default function RootLayout({
           href="https://fonts.gstatic.com"
           crossOrigin="anonymous"
         />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
         <meta httpEquiv="X-Content-Type-Options" content="nosniff" />
         <meta name="referrer" content="strict-origin-when-cross-origin" />
       </head>
@@ -32,9 +36,17 @@ export default function RootLayout({
         <Providers>
           <div className="min-h-screen flex flex-col">
             <Navbar />
-            <main className="flex-1 overflow-x-hidden">{children}</main>
+            {/* Full-width, constrained by individual page max-w */}
+            <main className="flex-1 w-full overflow-x-hidden">{children}</main>
+            <Footer />
           </div>
-          <Toaster position="top-right" richColors closeButton expand={false} />
+          <Toaster
+            position="top-center"
+            richColors
+            closeButton
+            expand={false}
+            visibleToasts={3}
+          />
         </Providers>
       </body>
     </html>

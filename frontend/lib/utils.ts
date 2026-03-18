@@ -104,3 +104,36 @@ export function roleLabel(role: string): string {
       return role;
   }
 }
+
+//  Human-readable error messages
+const ERROR_MAP: Record<string, string> = {
+  "HTTP 401": "Your session has expired. Please sign in again.",
+  "HTTP 403": "You do not have permission to perform this action.",
+  "HTTP 404": "The requested item was not found.",
+  "HTTP 422": "Some fields are invalid. Please check your input.",
+  "HTTP 429": "Too many requests. Please wait a moment and try again.",
+  "HTTP 500": "Something went wrong on the server. Please try again later.",
+  "HTTP 503": "The service is temporarily unavailable. Please try again later.",
+  "Cannot reach the server":
+    "Cannot connect to the server. Please check your connection.",
+  "Session expired": "Your session has expired. Please sign in again.",
+  "Not Found": "The requested item was not found.",
+  "already exists": "This already exists. Please use a different name.",
+  "already registered": "An account with this email already exists.",
+  "Invalid credentials": "Incorrect email or password. Please try again.",
+  "Incorrect password": "Incorrect password. Please try again.",
+  "Invalid token": "Your session is invalid. Please sign in again.",
+};
+
+export function friendlyError(msg: string | null | undefined): string {
+  if (!msg) return "Something went wrong. Please try again.";
+  for (const [key, friendly] of Object.entries(ERROR_MAP)) {
+    if (msg.includes(key)) return friendly;
+  }
+  // Clean up backend-style messages
+  if (msg.startsWith("HTTP "))
+    return `Request failed (${msg}). Please try again.`;
+  if (msg.length > 120) return "Something went wrong. Please try again.";
+  // Capitalize first letter
+  return msg.charAt(0).toUpperCase() + msg.slice(1);
+}

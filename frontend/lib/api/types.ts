@@ -15,7 +15,7 @@ export interface UserResponse {
   created_at: string;
 }
 
-// Clubs
+//  Clubs
 export interface ClubSearchResult {
   api_football_id: number;
   name: string;
@@ -37,7 +37,7 @@ export interface ClubResponse {
   last_synced_at: string;
 }
 
-//  Players
+// Players
 export interface PlayerData {
   id?: string;
   api_football_id: number;
@@ -116,7 +116,7 @@ export interface PlayerOverrideResponse extends PlayerOverrideRequest {
   updated_at: string;
 }
 
-//  Loans
+// Loans
 export interface LoanDealRequest {
   loan_direction: "in" | "out";
   counterpart_club_name?: string;
@@ -166,7 +166,7 @@ export interface LoanDealResponse {
   updated_at: string;
 }
 
-//  Contract Extensions
+// Contract Extensions
 export interface ContractExtensionRequest {
   new_contract_expiry_year: number;
   new_contract_length_years: number;
@@ -193,7 +193,7 @@ export interface ContractExtensionResponse {
   updated_at: string;
 }
 
-//  Squad Overrides
+// Squad Overrides
 export interface SquadOverrideCreateRequest {
   action: "add" | "remove";
   season_year?: number;
@@ -230,7 +230,7 @@ export interface SquadOverrideResponse {
   updated_at: string;
 }
 
-//  Simulations
+// Simulations
 export interface SimulationCreateRequest {
   club_api_football_id: number;
   simulation_name: string;

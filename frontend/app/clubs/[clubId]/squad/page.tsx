@@ -38,7 +38,7 @@ export default function SquadPage() {
   const [posFilter, setPosFilter] = useState("All");
   const [addOpen, setAddOpen] = useState(false);
 
-  //  Data fetching
+  // ── Data fetching ──────────────────────────────────────────
   const {
     data: rawData,
     isLoading,
@@ -60,7 +60,7 @@ export default function SquadPage() {
     staleTime: 1000 * 30,
   });
 
-  //  Mutations
+  // ── Mutations ──────────────────────────────────────────────
   const invalidate = () => {
     qc.removeQueries({ queryKey: ["squad", id] });
     qc.removeQueries({ queryKey: ["squad-overrides", id] });
@@ -132,7 +132,7 @@ export default function SquadPage() {
     },
   });
 
-  //  Derived state
+  // ── Derived state ──────────────────────────────────────────
   const { players, expired } = extractSquad(rawData);
 
   const overrideIdByApiId = new Map<number, string>();
@@ -160,7 +160,7 @@ export default function SquadPage() {
     (byPos[pos] ??= []).push(p);
   });
 
-  //  Handlers
+  // ── Handlers ──────────────────────────────────────────────
   const handleRemove = (p: any) => {
     if (
       !confirm(
