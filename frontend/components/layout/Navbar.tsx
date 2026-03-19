@@ -85,7 +85,7 @@ export function Navbar() {
   return (
     <>
       {/* Navbar — z-30 so modal at z-50 always covers it */}
-      <nav className="sticky top-0 z-30 glass border-b border-border/50">
+      <nav className="sticky top-0 z-30 border-b border-border bg-card/95 supports-[backdrop-filter]:bg-card/85 supports-[backdrop-filter]:backdrop-blur-md">
         <div className="w-full max-w-screen-2xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-4">
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2 group shrink-0">
@@ -245,10 +245,21 @@ export function Navbar() {
       {mobileOpen && (
         <>
           <div
-            className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm md:hidden"
+            className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm md:hidden"
             onClick={() => setMobileOpen(false)}
           />
-          <div className="fixed top-14 right-0 bottom-0 z-40 w-72 max-w-[85vw] bg-card border-l border-border shadow-2xl md:hidden animate-slide-in flex flex-col">
+          <div className="fixed top-0 right-0 bottom-0 z-50 w-72 max-w-[85vw] bg-card border-l border-border shadow-2xl md:hidden animate-slide-in flex flex-col">
+            <div className="flex items-center justify-between px-4 h-14 border-b border-border shrink-0">
+              <span className="font-display font-bold text-base">Menu</span>
+              <button
+                onClick={() => setMobileOpen(false)}
+                className="p-1.5 -mr-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-all"
+                aria-label="Close menu"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
             {/* User info */}
             {mounted && isAuthenticated && user && (
               <div className="flex items-center gap-3 px-4 py-4 border-b border-border bg-secondary/40 shrink-0">
@@ -272,6 +283,7 @@ export function Navbar() {
                 <Link
                   key={link.href}
                   href={link.href}
+                  onClick={() => setMobileOpen(false)}
                   className={cn(
                     "flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-medium transition-all",
                     isActive(link.href)
@@ -285,8 +297,8 @@ export function Navbar() {
               ))}
             </nav>
 
-            {/* Bottom */}
-            <div className="p-3 border-t border-border pb-safe shrink-0">
+            {/* Bottom actions */}
+            <div className="p-3 border-t border-border mt-auto shrink-0 bg-card">
               {mounted && isAuthenticated ? (
                 <button
                   onClick={handleLogout}
@@ -299,12 +311,14 @@ export function Navbar() {
                 <div className="grid grid-cols-2 gap-2">
                   <Link
                     href="/login"
+                    onClick={() => setMobileOpen(false)}
                     className="flex items-center justify-center py-2.5 rounded-xl text-sm font-medium border border-border hover:bg-secondary transition-all"
                   >
                     Sign in
                   </Link>
                   <Link
                     href="/register"
+                    onClick={() => setMobileOpen(false)}
                     className="flex items-center justify-center py-2.5 rounded-xl text-sm font-medium bg-primary text-white hover:bg-primary/90 transition-all"
                   >
                     Get started

@@ -1,16 +1,140 @@
 "use client";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { simulationsApi } from "@/lib/api/client";
 import type { SimulationResponse } from "@/lib/api/client";
 import { Skeleton } from "@/components/ui";
 import { formatEur } from "@/lib/utils";
-import { TrendingDown, ArrowRightLeft, Eye } from "lucide-react";
+import {
+  TrendingDown,
+  ArrowRightLeft,
+  Eye,
+  ShoppingBag,
+  UserCheck,
+} from "lucide-react";
 import Image from "next/image";
-import { useState } from "react";
+import { useState, useMemo } from "react";
+import { cn } from "@/lib/utils";
 import { extractSquad, normalizePosition } from "@/components/squad/utils";
 import { TransferForm } from "./TransferForm";
 
 const POS = ["Goalkeeper", "Defender", "Midfielder", "Attacker", "Unknown"];
+
+//  Transfer status for a player
+type TransferStatus =
+  | { type: "sold"; item: any }
+  | { type: "loaned_out"; item: any }
+  | { type: "bought"; item: any }
+  | { type: "loaned_in"; item: any }
+  | null;
+
+/** Match a squad player against a list of transfer entries */
+function matchPlayer(player: any, entries: any[]): any | null {
+  const apiId = Number(player.api_football_id);
+  const name = player.name?.toLowerCase().trim();
+  return (
+    entries.find((e) => {
+      if (
+        apiId > 0 &&
+        e.api_football_player_id &&
+        e.api_football_player_id === apiId
+      )
+        return true;
+      return e.player_name?.toLowerCase().trim() === name;
+    }) ?? null
+  );
+}
+
+function buildStatus(player: any, sim: SimulationResponse): TransferStatus {
+  const sold = matchPlayer(player, sim.sells ?? []);
+  if (sold) return { type: "sold", item: sold };
+  const loanedOut = matchPlayer(player, sim.loans_out ?? []);
+  if (loanedOut) return { type: "loaned_out", item: loanedOut };
+  const bought = matchPlayer(player, sim.buys ?? []);
+  if (bought) return { type: "bought", item: bought };
+  const loanedIn = matchPlayer(player, sim.loans_in ?? []);
+  if (loanedIn) return { type: "loaned_in", item: loanedIn };
+  return null;
+}
+
+//  Status badge + details strip
+function StatusBadge({ status }: { status: TransferStatus }) {
+  if (!status) return null;
+
+  const config = {
+    sold: {
+      label: "SOLD",
+      bg: "bg-red-500/15",
+      text: "text-red-600 dark:text-red-400",
+      border: "border-red-500/25",
+    },
+    loaned_out: {
+      label: "LOANED OUT",
+      bg: "bg-orange-500/15",
+      text: "text-orange-600 dark:text-orange-400",
+      border: "border-orange-500/25",
+    },
+    bought: {
+      label: "NEW SIGNING",
+      bg: "bg-emerald-500/15",
+      text: "text-emerald-600 dark:text-emerald-400",
+      border: "border-emerald-500/25",
+    },
+    loaned_in: {
+      label: "LOAN IN",
+      bg: "bg-blue-500/15",
+      text: "text-blue-600 dark:text-blue-400",
+      border: "border-blue-500/25",
+    },
+  }[status.type];
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border shrink-0",
+        config.bg,
+        config.text,
+        config.border,
+      )}
+    >
+      {config.label}
+    </span>
+  );
+}
+
+/** One-line detail under player name showing key transfer info */
+function TransferDetail({ status }: { status: TransferStatus }) {
+  if (!status) return null;
+  const { type, item } = status;
+
+  const parts: string[] = [];
+  if (type === "sold") {
+    if (item.transfer_fee)
+      parts.push(`Fee: ${formatEur(item.transfer_fee, true)}`);
+  } else if (type === "loaned_out") {
+    if (item.loan_fee_received)
+      parts.push(`Rcvd: ${formatEur(item.loan_fee_received, true)}`);
+    if (item.wage_contribution_pct != null)
+      parts.push(`${item.wage_contribution_pct}% wages`);
+    if (item.has_option_to_sell) parts.push("Option to sell");
+  } else if (type === "bought") {
+    if (item.transfer_fee)
+      parts.push(`Fee: ${formatEur(item.transfer_fee, true)}`);
+    if (item.contract_length_years)
+      parts.push(`${item.contract_length_years}yr contract`);
+  } else if (type === "loaned_in") {
+    if (item.loan_fee) parts.push(`Fee: ${formatEur(item.loan_fee, true)}`);
+    if (item.wage_contribution_pct != null)
+      parts.push(`${item.wage_contribution_pct}% wages`);
+    if (item.has_option_to_buy) parts.push("Option to buy");
+  }
+
+  if (!parts.length) return null;
+  return (
+    <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
+      {parts.join(" · ")}
+    </p>
+  );
+}
 
 interface Props {
   simId: string;
@@ -34,6 +158,18 @@ export function SimulatedSquad({ simId, sim }: Props) {
 
   const { players } = extractSquad(raw);
 
+  // Pre-compute status for every player
+  const playerStatuses = useMemo(
+    () =>
+      Object.fromEntries(
+        players.map((p) => [
+          p.id ?? p.api_football_id ?? p.name,
+          buildStatus(p, sim),
+        ]),
+      ),
+    [players, sim],
+  );
+
   const byPos: Record<string, any[]> = {};
   players.forEach((p) => {
     const pos = normalizePosition(p.position) || "Unknown";
@@ -52,20 +188,23 @@ export function SimulatedSquad({ simId, sim }: Props) {
   if (error)
     return (
       <div className="p-4 bg-destructive/5 border border-destructive/20 rounded-xl text-sm text-destructive">
-        Could not load simulated squad. The backend may not support this
-        endpoint yet.
+        Could not load simulated squad.
       </div>
     );
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 p-3 bg-primary/5 border border-primary/20 rounded-xl text-xs text-primary">
-        <Eye className="w-3.5 h-3.5 shrink-0" />
-        Squad <strong>after</strong> all simulation transfers are applied (
-        {players.length} players). Click a player to sell or loan out.
+      {/* Legend */}
+      <div className="flex items-start gap-2 p-3 bg-primary/5 border border-primary/20 rounded-xl text-xs text-muted-foreground">
+        <Eye className="w-3.5 h-3.5 shrink-0 text-primary mt-0.5" />
+        <span>
+          Squad <strong className="text-foreground">after</strong> all transfers
+          — {players.length} players. Sold/loaned-out players are greyed and
+          locked.
+        </span>
       </div>
 
-      {players.length === 0 && !isLoading && (
+      {players.length === 0 && (
         <p className="text-center py-8 text-sm text-muted-foreground">
           No squad data returned from server.
         </p>
@@ -81,74 +220,120 @@ export function SimulatedSquad({ simId, sim }: Props) {
               {pos}s ({group.length})<span className="h-px flex-1 bg-border" />
             </p>
             <div className="space-y-1">
-              {group.map((p: any) => (
-                <div
-                  key={p.id ?? p.api_football_id ?? p.name}
-                  className="flex items-center gap-3 p-3 bg-card border border-border rounded-xl hover:border-primary/20 transition-all"
-                >
-                  <div className="w-8 h-8 rounded-full bg-secondary flex items-center justify-center shrink-0 overflow-hidden">
-                    {p.photo_url ? (
-                      <Image
-                        src={p.photo_url}
-                        alt={p.name}
-                        width={32}
-                        height={32}
-                        className="object-cover rounded-full"
-                        unoptimized
-                      />
-                    ) : (
-                      <span className="text-xs font-bold text-muted-foreground">
-                        {p.name?.[0]}
-                      </span>
+              {group.map((p: any) => {
+                const key = p.id ?? p.api_football_id ?? p.name;
+                const status = playerStatuses[key];
+                const isGone =
+                  status?.type === "sold" || status?.type === "loaned_out";
+
+                return (
+                  <div
+                    key={key}
+                    className={cn(
+                      "flex items-center gap-3 p-3 border rounded-xl transition-all",
+                      isGone
+                        ? "bg-muted/30 border-border/40 opacity-60"
+                        : status?.type === "bought"
+                          ? "bg-emerald-500/5 border-emerald-500/20"
+                          : status?.type === "loaned_in"
+                            ? "bg-blue-500/5 border-blue-500/20"
+                            : "bg-card border-border hover:border-primary/20",
                     )}
+                  >
+                    {/* Avatar */}
+                    <div className="w-8 h-8 rounded-full bg-secondary flex items-center justify-center shrink-0 overflow-hidden">
+                      {p.photo_url ? (
+                        <Image
+                          src={p.photo_url}
+                          alt={p.name}
+                          width={32}
+                          height={32}
+                          className="object-cover rounded-full"
+                          unoptimized
+                        />
+                      ) : (
+                        <span className="text-xs font-bold text-muted-foreground">
+                          {p.name?.[0]}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Name + status */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <p
+                          className={cn(
+                            "font-medium text-sm truncate",
+                            isGone && "line-through text-muted-foreground",
+                          )}
+                        >
+                          {p.name}
+                        </p>
+                        <StatusBadge status={status} />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs text-muted-foreground truncate">
+                          {p.nationality}
+                          {p.age ? ` · ${p.age}` : ""}
+                        </p>
+                        <TransferDetail status={status} />
+                      </div>
+                    </div>
+
+                    {/* Salary */}
+                    <div className="hidden sm:block text-right text-xs mr-2 shrink-0">
+                      <p className="font-medium">
+                        {(p.annual_salary ?? p.estimated_annual_salary)
+                          ? formatEur(
+                              p.annual_salary ?? p.estimated_annual_salary,
+                              true,
+                            ) + "/yr"
+                          : "—"}
+                      </p>
+                      <p className="text-muted-foreground">
+                        {p.contract_expiry_year
+                          ? `Exp. ${p.contract_expiry_year}`
+                          : ""}
+                      </p>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex gap-1 shrink-0">
+                      {isGone ? (
+                        // Already transferred — show locked state
+                        <span className="text-[10px] text-muted-foreground px-2 py-1 rounded-lg bg-secondary/50">
+                          {status?.type === "sold" ? "✓ Sold" : "✓ Out on loan"}
+                        </span>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setSellPlayer(p)}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors font-medium"
+                          >
+                            <TrendingDown className="w-3 h-3" />
+                            Sell
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setLoanPlayer(p)}
+                            className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-orange-500/10 text-orange-600 dark:text-orange-400 hover:bg-orange-500/20 transition-colors font-medium"
+                          >
+                            <ArrowRightLeft className="w-3 h-3" />
+                            Loan
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm truncate">{p.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {p.nationality}
-                      {p.age ? ` · ${p.age}` : ""}
-                    </p>
-                  </div>
-                  <div className="hidden sm:block text-right text-xs mr-2 shrink-0">
-                    <p className="font-medium">
-                      {(p.annual_salary ?? p.estimated_annual_salary)
-                        ? formatEur(
-                            p.annual_salary ?? p.estimated_annual_salary,
-                            true,
-                          ) + "/yr"
-                        : "—"}
-                    </p>
-                    <p className="text-muted-foreground">
-                      {p.contract_expiry_year
-                        ? `Exp. ${p.contract_expiry_year}`
-                        : ""}
-                    </p>
-                  </div>
-                  <div className="flex gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setSellPlayer(p)}
-                      className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors font-medium"
-                    >
-                      <TrendingDown className="w-3 h-3" />
-                      Sell
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setLoanPlayer(p)}
-                      className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-orange-500/10 text-orange-600 dark:text-orange-400 hover:bg-orange-500/20 transition-colors font-medium"
-                    >
-                      <ArrowRightLeft className="w-3 h-3" />
-                      Loan Out
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         );
       })}
 
+      {/* Transfer forms */}
       {sellPlayer && (
         <TransferForm
           open

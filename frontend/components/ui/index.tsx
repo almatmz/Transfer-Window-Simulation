@@ -1,9 +1,10 @@
 "use client";
-import React from "react";
+import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { AlertCircle, Loader2, Search, X, ChevronDown } from "lucide-react";
 
-// ── Button ────────────────────────────────────────────────────
+// Button
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "primary" | "secondary" | "ghost" | "danger" | "outline";
   size?: "sm" | "md" | "lg";
@@ -47,7 +48,7 @@ export function Button({
   );
 }
 
-// ── Input ─────────────────────────────────────────────────────
+//  Input
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
@@ -104,7 +105,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
 );
 Input.displayName = "Input";
 
-// ── Textarea ──────────────────────────────────────────────────
+//  Textarea
 interface TextareaProps extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
   label?: string;
   error?: string;
@@ -146,7 +147,7 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
 );
 Textarea.displayName = "Textarea";
 
-// ── Select ────────────────────────────────────────────────────
+// Select
 interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
   label?: string;
   error?: string;
@@ -186,7 +187,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
 );
 Select.displayName = "Select";
 
-// ── Card ──────────────────────────────────────────────────────
+//  Card
 interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
   hover?: boolean;
   padding?: boolean;
@@ -213,7 +214,7 @@ export function Card({
   );
 }
 
-// ── Badge ─────────────────────────────────────────────────────
+//  Badge
 interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   variant?: "default" | "success" | "warning" | "danger" | "info" | "violet";
 }
@@ -247,12 +248,12 @@ export function Badge({
   );
 }
 
-// ── Skeleton ──────────────────────────────────────────────────
+//  Skeleton
 export function Skeleton({ className }: { className?: string }) {
   return <div className={cn("skeleton", className)} />;
 }
 
-// ── LoadingSpinner ────────────────────────────────────────────
+//  LoadingSpinner
 export function LoadingSpinner({
   size = "md",
   className,
@@ -273,7 +274,7 @@ export function LoadingSpinner({
   );
 }
 
-// ── PageLoader ────────────────────────────────────────────────
+//  PageLoader
 export function PageLoader() {
   return (
     <div className="flex flex-col items-center justify-center min-h-[40vh] gap-3">
@@ -283,7 +284,7 @@ export function PageLoader() {
   );
 }
 
-// ── ErrorMessage ──────────────────────────────────────────────
+//  ErrorMessage
 export function ErrorMessage({
   message,
   onRetry,
@@ -306,7 +307,7 @@ export function ErrorMessage({
   );
 }
 
-// ── EmptyState ────────────────────────────────────────────────
+//  EmptyState
 export function EmptyState({
   icon,
   title,
@@ -330,7 +331,7 @@ export function EmptyState({
   );
 }
 
-// ── KpiCard ───────────────────────────────────────────────────
+//  KpiCard
 export function KpiCard({
   label,
   value,
@@ -363,7 +364,7 @@ export function KpiCard({
   );
 }
 
-// ── Modal ─────────────────────────────────────────────────────
+//  Modal
 export function Modal({
   open,
   onClose,
@@ -377,7 +378,13 @@ export function Modal({
   children: React.ReactNode;
   size?: "sm" | "md" | "lg" | "xl";
 }) {
-  React.useEffect(() => {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
     if (open) document.body.style.overflow = "hidden";
     else document.body.style.overflow = "";
     return () => {
@@ -385,9 +392,10 @@ export function Modal({
     };
   }, [open]);
 
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  if (!open || !mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[999] flex items-center justify-center p-4">
       <div
         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
         onClick={onClose}
@@ -415,11 +423,12 @@ export function Modal({
         )}
         <div className="overflow-y-auto flex-1 p-6">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
-// ── Tabs ──────────────────────────────────────────────────────
+//  Tabs
 export function Tabs({
   tabs,
   active,
@@ -461,7 +470,7 @@ export function Tabs({
   );
 }
 
-// ── SearchDropdown (player search within squad) ───────────────
+//  SearchDropdown (player search within squad)
 interface PlayerOption {
   id: number;
   name: string;
@@ -550,7 +559,7 @@ export function PlayerSearchDropdown({
   );
 }
 
-// ── ClubSearchDropdown ────────────────────────────────────────
+// ClubSearchDropdown
 export function ClubSearchInput({
   label,
   value,
@@ -655,7 +664,7 @@ export function ClubSearchInput({
   );
 }
 
-// ── FFP Status Badge ──────────────────────────────────────────
+//  FFP Status Badge
 export function FFPBadge({ status }: { status: string }) {
   const s = status?.toLowerCase();
   return (
@@ -675,7 +684,7 @@ export function FFPBadge({ status }: { status: string }) {
   );
 }
 
-// ── Position badge ────────────────────────────────────────────
+//  Position badge
 export function PositionBadge({ position }: { position?: string }) {
   const p = position?.toUpperCase() ?? "?";
   const color = p.startsWith("G")

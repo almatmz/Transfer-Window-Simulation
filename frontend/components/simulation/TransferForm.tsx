@@ -61,6 +61,22 @@ export function TransferForm({
   });
   const hasOptBuy = watch("has_option_to_buy");
   const hasOptSell = watch("has_option_to_sell");
+  const playerName = watch("player_name");
+
+  // Check for duplicate in current list
+  const existingList: any[] =
+    !isEdit && (isBuy || isLoanIn)
+      ? ((qc.getQueryData(["sim", simId]) as any)?.[
+          isBuy ? "buys" : "loans_in"
+        ] ?? [])
+      : [];
+  const isDuplicate =
+    !isEdit &&
+    !!playerName &&
+    existingList.some(
+      (e: any) =>
+        e.player_name?.toLowerCase().trim() === playerName.toLowerCase().trim(),
+    );
 
   const fillFromPlayer = (p: any) => {
     setValue("player_name", p.name);
@@ -80,6 +96,26 @@ export function TransferForm({
   const b = (v: any) => v === true || v === "true";
 
   const onSubmit = async (data: any) => {
+    // Duplicate check — same player can't be bought/loaned-in twice
+    if (!isEdit && (isBuy || isLoanIn)) {
+      const existing = isBuy
+        ? ((qc.getQueryData(["sim", simId]) as any)?.buys ?? [])
+        : ((qc.getQueryData(["sim", simId]) as any)?.loans_in ?? []);
+      const name = data.player_name?.toLowerCase().trim();
+      const apiId = data.api_football_player_id
+        ? Number(data.api_football_player_id)
+        : null;
+      const dupe = existing.find((e: any) => {
+        if (apiId && e.api_football_player_id === apiId) return true;
+        return e.player_name?.toLowerCase().trim() === name;
+      });
+      if (dupe) {
+        toast.error(
+          `${data.player_name} is already in your ${isBuy ? "buys" : "loans in"} list`,
+        );
+        return;
+      }
+    }
     try {
       if (isBuy) {
         const body = {
@@ -166,6 +202,17 @@ export function TransferForm({
       size="md"
     >
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-3" noValidate>
+        {/* Duplicate warning */}
+        {isDuplicate && (
+          <div className="flex items-center gap-2 p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-600 dark:text-amber-400">
+            <span className="shrink-0">⚠️</span>
+            <span>
+              <strong>{playerName}</strong> is already in your{" "}
+              {isBuy ? "buys" : "loans in"} list.
+            </span>
+          </div>
+        )}
+
         {/* Player search/selection */}
         {!isEdit && (
           <div>
