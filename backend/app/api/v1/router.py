@@ -8,7 +8,6 @@ from app.api.v1.endpoints import (
     ffp,
     admin,
     squad_overrides,
-    loans,
     contract_extensions,
 )
 
@@ -21,5 +20,4 @@ api_router.include_router(transfers.router)
 api_router.include_router(ffp.router)
 api_router.include_router(admin.router)
 api_router.include_router(squad_overrides.router)
-api_router.include_router(loans.router)
 api_router.include_router(contract_extensions.router)

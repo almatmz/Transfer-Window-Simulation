@@ -6,7 +6,6 @@ from app.core.security import UserRole
 from app.models.club import Club
 from app.models.player import Player
 from app.models.player_override import PlayerOverride
-from app.models.loan_deal import LoanDeal
 from app.models.contract_extension import ContractExtension
 from app.models.transfer import TransferSimulation
 from app.models.user import User
@@ -26,7 +25,7 @@ from app.utils.ffp_calculator import (
 _NOW_YEAR = 2026
 
 
-#  Bulk loader 
+# Bulk loader 
 
 class SquadContext:
     """
@@ -40,8 +39,8 @@ class SquadContext:
         admin_extensions: dict[str, ContractExtension],  # player_id → extension
         sd_extensions: dict[str, ContractExtension],     # player_id → extension
         user_extensions: dict[str, ContractExtension],   # player_id → extension
-        admin_loans: dict[tuple, LoanDeal],               # (player_id, direction) → deal
-        sd_loans: dict[tuple, LoanDeal],                  # (player_id, direction) → deal
+        admin_loans: dict,               # (player_id, direction) → deal
+        sd_loans: dict,                  # (player_id, direction) → deal
     ):
         self.admin_overrides = admin_overrides
         self.sd_overrides = sd_overrides
@@ -106,7 +105,7 @@ class SquadContext:
 
     def get_loan(
         self, player_id: str, direction: str, is_sd: bool, viewer_id: str | None
-    ) -> LoanDeal | None:
+    ) -> object | None:
         """Priority: SD > Admin"""
         if is_sd and viewer_id:
             deal = self.sd_loans.get((player_id, direction))
@@ -171,20 +170,11 @@ async def _load_squad_context(
         elif ext.set_by_role == "user" and ext.set_by_user_id == viewer_id:
             user_extensions[ext.player_id] = ext
 
-    # Query 4: Admin LoanDeals for all players
-    admin_loans_list = await LoanDeal.find(
-        {"player_id": {"$in": player_ids}, "set_by_role": "admin", "is_active": True}
-    ).to_list()
-    admin_loans = {(d.player_id, d.loan_direction): d for d in admin_loans_list}
-
-    # Query 5: Viewer's SD LoanDeals (only if SD/Admin)
-    sd_loans: dict[tuple, LoanDeal] = {}
-    if is_sd and viewer_id:
-        sd_loans_list = await LoanDeal.find(
-            {"player_id": {"$in": player_ids}, "set_by_user_id": viewer_id,
-             "set_by_role": "sport_director", "is_active": True}
-        ).to_list()
-        sd_loans = {(d.player_id, d.loan_direction): d for d in sd_loans_list}
+    # Loan deals are no longer tracked via LoanDeal model.
+    # Loan status is read directly from Player fields (loaned_out, loaned_out_wage_contribution_pct etc.)
+    # and from PlayerOverride for SD/Admin corrections.
+    admin_loans: dict = {}
+    sd_loans: dict = {}
 
     return SquadContext(
         admin_overrides=admin_overrides,
@@ -197,7 +187,7 @@ async def _load_squad_context(
     )
 
 
-#  Player wage helper 
+# Player wage helper 
 
 def _effective_wage(
     player: Player,
@@ -238,7 +228,7 @@ def _effective_wage(
     return sal, yrs, fee, acq_year, src, extra_amort
 
 
-#  Per-year wage bill 
+# ─────────────────────── Per-year wage bill ─────────────────────────────────
 
 def _player_active_in_year(
     player: Player,
@@ -343,7 +333,7 @@ def _compute_yearly_wage_bill(
     return wage_bills
 
 
-#  Main FFP function 
+# ─────────────────────── Main FFP function ──────────────────────────────────
 
 async def get_ffp_dashboard_by_api_id(
     api_football_id: int,
@@ -374,43 +364,23 @@ async def get_ffp_dashboard_by_api_id(
     from app.services.club_service import get_effective_revenue
     annual_revenue = await get_effective_revenue(club, viewer_id)
 
-    #  BULK LOAD: 5 queries for the entire squad 
+    # ── BULK LOAD: 5 queries for the entire squad ────────────────────────────
     active_players = [p for p in players if not p.is_sold]
 
-    # Also include loaned-IN players (belong to other clubs, but cost wages here)
-    loan_in_deals = await LoanDeal.find({
-        "club_api_football_id": api_football_id,
-        "loan_direction": "in",
-        "is_active": True,
-        "option_exercised": False,
-    }).to_list()
-
-    # Deduplicate: SD deal wins over admin deal for same player
-    loan_in_by_player: dict[str, LoanDeal] = {}
-    for deal in loan_in_deals:
-        if not is_sd and deal.set_by_role != "admin":
-            continue
-        existing = loan_in_by_player.get(deal.player_id)
-        if existing is None:
-            loan_in_by_player[deal.player_id] = deal
-        elif deal.set_by_role == "sport_director" and deal.set_by_user_id == viewer_id:
-            loan_in_by_player[deal.player_id] = deal
-
-    # Fetch loaned-in player documents
-    loaned_in_player_ids = list(loan_in_by_player.keys())
-    loaned_in_players: list[Player] = []
-    if loaned_in_player_ids:
-        import bson
-        loaned_in_players = await Player.find(
-            {"_id": {"$in": [bson.ObjectId(pid) for pid in loaned_in_player_ids]}}
-        ).to_list()
+    # Loaned-IN players from other clubs who play here
+    # Detected via Player.loaned_out_to_club_id field (set when loan is confirmed)
+    loaned_in_players: list[Player] = await Player.find(
+        Player.loaned_out_to_club_id == str(api_football_id),
+        Player.is_sold == False,  # noqa: E712
+    ).to_list()
+    loan_in_by_player: dict[str, None] = {}  # kept for compatibility with _compute_yearly_wage_bill
 
     all_active = active_players + loaned_in_players
     player_ids = [str(p.id) for p in all_active]
 
     ctx = await _load_squad_context(player_ids, is_sd, viewer_id, viewer_role)
 
-    # Baseline loop: pure dict lookups, zero DB calls 
+    # ── Baseline loop: pure dict lookups, zero DB calls ──────────────────────
     baseline_wages = 0.0
     baseline_amort = 0.0
     sources_used: set[str] = set()
@@ -431,29 +401,17 @@ async def get_ffp_dashboard_by_api_id(
         sources_used.add(src)
 
     # Loaned-in players: add this club's wage contribution to wage bill
-    # (they don't appear in own players, so handle separately)
+    # Wage contribution % is stored on the player's loaned_out_wage_contribution_pct
     for player in loaned_in_players:
-        pid = str(player.id)
-        deal = loan_in_by_player.get(pid)
-        if not deal:
-            continue
-        # Wage cost = annual_salary * this club's contribution %
-        wage_cost = deal.annual_salary * deal.wage_contribution_pct / 100
+        pct = getattr(player, "loaned_out_wage_contribution_pct", 100.0)
+        wage_cost = player.estimated_annual_salary * pct / 100
         baseline_wages += wage_cost
-        # Loan fee amortized over contract years if option to buy exists
-        if deal.has_option_to_buy and deal.option_to_buy_fee and deal.option_contract_years:
-            baseline_amort += amortization_for_season(
-                fee=deal.option_to_buy_fee,
-                contract_years=deal.option_contract_years,
-                acquisition_year=deal.loan_start_date.year if deal.loan_start_date else start_year,
-                target_season_year=start_year,
-            )
-        sources_used.add(f"loan_in_{deal.set_by_role}")
+        sources_used.add(player.salary_source or "position_estimate")
 
     # Build player lookup map for simulation (by api_football_id)
     player_map = {p.api_football_id: p for p in players + loaned_in_players}
 
-    #  Simulation overlay
+    # ── Simulation overlay ───────────────────────────────────────────────────
     sim = None
     net_spend = 0.0
     loan_fee_impact = 0.0
@@ -528,7 +486,7 @@ async def get_ffp_dashboard_by_api_id(
             loan_fee_impact -= lo.loan_fee_received
             net_spend -= lo.loan_fee_received
 
-    #  Final totals 
+    # ── Final totals ─────────────────────────────────────────────────────────
     total_wages = max(baseline_wages + extra_wages - sell_wages, 0.0)
     total_amort = max(baseline_amort + extra_amort - sell_amort_relief, 0.0)
     current_scr = squad_cost_ratio_calc(annual_revenue, total_wages, total_amort)

@@ -44,7 +44,9 @@ class PlayerPublicResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # SD / Admin response — adds override metadata + financial details
+# ─────────────────────────────────────────────────────────────────────────────
 
 class PlayerSDResponse(PlayerPublicResponse):
     """
@@ -57,7 +59,7 @@ class PlayerSDResponse(PlayerPublicResponse):
     The override_* fields expose what each layer has set, so the SD
     can see exactly what is overriding what.
     """
-
+    # ── What the Admin has overridden (visible to all SD/Admin) ───────────
     admin_override_id: Optional[str] = None
     admin_annual_salary: Optional[float] = None
     admin_contract_expiry_year: Optional[int] = None
@@ -67,6 +69,7 @@ class PlayerSDResponse(PlayerPublicResponse):
     admin_notes: Optional[str] = None
     has_admin_override: bool = False
 
+    # ── What THIS SD has overridden (private to them) ─────────────────────
     sd_override_id: Optional[str] = None
     sd_annual_salary: Optional[float] = None
     sd_contract_expiry_year: Optional[int] = None
@@ -76,18 +79,22 @@ class PlayerSDResponse(PlayerPublicResponse):
     sd_notes: Optional[str] = None
     has_sd_override: bool = False
 
-    #  Computed amortization (from the merged view values above) 
+    # ── Computed amortization (from the merged view values above) ─────────
     annual_amortization: Optional[float] = None
     remaining_book_value: Optional[float] = None
     seasons_elapsed: Optional[int] = None
 
-    # ── SD-only loan financial details 
+    # ── SD-only loan financial details ────────────────────────────────────
     loan_fee: Optional[float] = None
     loan_from_club_id: Optional[str] = None
     loan_start_date: Optional[date] = None
     loan_wage_contribution_pct: Optional[float] = None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Override request — used by both Admin and SD
+# All fields are optional: only fields you send are overridden
+# ─────────────────────────────────────────────────────────────────────────────
 
 class PlayerOverrideRequest(BaseModel):
     """
@@ -120,12 +127,27 @@ class PlayerOverrideRequest(BaseModel):
     acquisition_fee: Optional[float] = Field(default=None, ge=0)
     acquisition_year: Optional[int] = Field(default=None, ge=2000, le=2045)
 
-    # Loan
+    # Loan IN — correct/set loan-from-another-club status
     is_on_loan: Optional[bool] = None
     loan_from_club: Optional[str] = None
+    loan_from_club_id: Optional[str] = None
+    loan_start_date: Optional[date] = None
     loan_end_date: Optional[date] = None
     loan_fee: Optional[float] = Field(default=None, ge=0)
+    loan_option_to_buy: Optional[bool] = None
+    loan_option_to_buy_fee: Optional[float] = Field(default=None, ge=0)
     loan_wage_contribution_pct: Optional[float] = Field(default=None, ge=0, le=100)
+
+    # Loan OUT — correct/set loaned-out-to-another-club status
+    loaned_out: Optional[bool] = None
+    loaned_out_to_club: Optional[str] = None
+    loaned_out_to_club_id: Optional[str] = None
+    loaned_out_start_date: Optional[date] = None
+    loaned_out_end_date: Optional[date] = None
+    loaned_out_fee: Optional[float] = Field(default=None, ge=0)
+    loaned_out_option_to_buy: Optional[bool] = None
+    loaned_out_option_to_buy_fee: Optional[float] = Field(default=None, ge=0)
+    loaned_out_wage_contribution_pct: Optional[float] = Field(default=None, ge=0, le=100)
 
     # Transfermarkt
     transfermarkt_url: Optional[str] = None
@@ -134,6 +156,7 @@ class PlayerOverrideRequest(BaseModel):
 
 
 # Override response
+
 class PlayerOverrideResponse(BaseModel):
     id: str
     player_id: str

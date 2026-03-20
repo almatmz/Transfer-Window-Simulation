@@ -1,8 +1,9 @@
 from beanie import Document
-from pydantic import Field, BaseModel
+from pydantic import Field, BaseModel, model_validator
 from datetime import datetime
 from enum import Enum
 from typing import Optional
+import re
 
 
 class WindowType(str, Enum):
@@ -16,16 +17,51 @@ class YearlyProjection(BaseModel):
     wage_bill: float
     amortization: float
     squad_cost: float
-    squad_cost_ratio: float       # decimal e.g. 0.68 = 68%
+    squad_cost_ratio: float
     net_transfer_spend: float
     operating_result: float
     ffp_status: str
 
 
-# ─── Individual transfer entries ──────────────────────────────────────────────
+#  Loan duration helper 
+
+def compute_loan_end_season(window_type: str, season: str, loan_duration_months: int) -> str:
+    """
+    Computes the season string when a loan expires.
+
+    Examples:
+      Summer 2026/27 + 12 months → "Summer 2027/28"  (full season loan)
+      Summer 2026/27 +  6 months → "Winter 2026/27"  (half season loan)
+      Winter 2026/27 + 12 months → "Winter 2027/28"
+      Winter 2026/27 +  6 months → "Summer 2027/28"
+    """
+    match = re.search(r'(\d{4})', season)
+    start_year = int(match.group(1)) if match else 2026
+
+    is_summer = window_type.lower() == "summer"
+    # Summer window opens ~month 6, Winter ~month 12
+    start_month = 6 if is_summer else 12
+
+    total_months = start_year * 12 + start_month + loan_duration_months
+    end_year = total_months // 12
+    end_month = total_months % 12
+    if end_month == 0:
+        end_month = 12
+        end_year -= 1
+
+    end_window = "Summer" if end_month <= 6 else "Winter"
+    end_short = str(end_year + 1)[-2:]
+    return f"{end_window} {end_year}/{end_short}"
+
+
+#  Transfer entries 
 
 class BuyEntry(BaseModel):
-    """Buy a player. Fee amortized over contract years. Full salary on wage bill."""
+    """
+    Buy a player permanently.
+    Transfer fee is amortized over contract_length_years.
+    Full annual_salary added to wage bill.
+    """
     player_name: str
     position: str
     age: int = Field(..., ge=15, le=45)
@@ -33,15 +69,18 @@ class BuyEntry(BaseModel):
     transfer_fee: float = Field(..., ge=0)
     annual_salary: float = Field(..., gt=0)
     contract_length_years: int = Field(..., ge=1, le=10)
-    api_football_player_id: Optional[int] = None   # if known (e.g. player from another club)
+    api_football_player_id: Optional[int] = None
 
 
 class SellEntry(BaseModel):
-    """Sell a player. Removes their wages and book value from your books."""
+    """
+    Sell a player permanently.
+    Removes their wages and remaining book value.
+    Book profit/loss = sale_fee − remaining_book_value counted as relevant income.
+    """
     player_name: str
     position: str
     transfer_fee: float = Field(..., ge=0)
-    # Link to squad player to auto-load salary + remaining amortization
     api_football_player_id: Optional[int] = None
     # Only needed if NOT linking a squad player
     annual_salary: float = Field(default=0.0, ge=0)
@@ -52,22 +91,38 @@ class LoanInEntry(BaseModel):
     """
     Take a player on loan from another club.
 
-    wage_contribution_pct: percentage of wages YOUR club pays.
-    - 100 = you pay everything (rare)
-    - 50  = you pay half, parent club pays half (common)
-    - 0   = parent club pays everything (very rare)
+    loan_duration_months: how long the loan lasts.
+      Common values: 6 (half season), 12 (full season), 18 (1.5 seasons)
+
+    loan_end_season: automatically computed — the season when the loan expires.
+      Summer 2026/27 + 12 months → "Summer 2027/28"
+      Summer 2026/27 +  6 months → "Winter 2026/27"
+
+    wage_contribution_pct: % of wages YOUR club pays.
+      50 = you pay half (most common), 100 = you pay all, 0 = parent pays all
     """
     player_name: str
     position: str
-    age: Optional[int] = Field(default=None, ge=15, le=45)   # Optional if api_football_player_id set
+    age: Optional[int] = Field(default=None, ge=15, le=45)
+    nationality: str = ""
     api_football_player_id: Optional[int] = None
+
     loan_fee: float = Field(default=0.0, ge=0)
     annual_salary: float = Field(..., gt=0)
     wage_contribution_pct: float = Field(
         default=50.0, ge=0, le=100,
-        description="% of this player's salary YOUR club pays. Parent club pays the rest."
+        description="% of this player's salary YOUR club pays. Parent club pays the rest.",
     )
-    contract_length_years: int = Field(default=1, ge=1, le=3)
+
+    loan_duration_months: int = Field(
+        default=12, ge=1, le=36,
+        description="How long the loan lasts. 6=half season, 12=full season, 18=1.5 seasons.",
+    )
+    loan_end_season: str = Field(
+        default="",
+        description="Auto-computed when simulation is created/updated. e.g. 'Summer 2027/28'",
+    )
+
     has_option_to_buy: bool = False
     option_to_buy_fee: float = Field(default=0.0, ge=0)
     option_to_buy_year: int = Field(default=0, ge=0)
@@ -77,24 +132,36 @@ class LoanOutEntry(BaseModel):
     """
     Send one of your players on loan.
 
-    wage_contribution_pct: percentage of wages YOUR club still pays.
-    - 0   = fully off your books (loan club pays everything — best for FFP)
-    - 30  = you keep paying 30%, loan club pays 70%
-    - 100 = you pay everything (pointless loan — same as keeping them)
+    loan_duration_months: how long the loan lasts.
+    loan_end_season: automatically computed.
+
+    wage_contribution_pct: % of salary YOUR club still pays.
+      0 = fully off your books (best for FFP), 30 = you keep paying 30%
     """
     player_name: str
     position: str
+    nationality: str = ""
     api_football_player_id: Optional[int] = None
+
     loan_fee_received: float = Field(default=0.0, ge=0)
-    annual_salary: float = Field(default=0.0, ge=0)   # auto-loaded if api_football_player_id set
+    annual_salary: float = Field(default=0.0, ge=0)
     wage_contribution_pct: float = Field(
         default=0.0, ge=0, le=100,
-        description="% of salary YOUR club still pays. 0 = fully off your books."
+        description="% of salary YOUR club still pays. 0 = fully off your books.",
     )
-    contract_length_years: int = Field(default=1, ge=1, le=3)
-    has_option_to_sell: bool = False
-    option_to_sell_fee: float = Field(default=0.0, ge=0)
-    option_to_sell_year: int = Field(default=0, ge=0)
+
+    loan_duration_months: int = Field(
+        default=12, ge=1, le=36,
+        description="How long the loan lasts. 6=half season, 12=full season.",
+    )
+    loan_end_season: str = Field(
+        default="",
+        description="Auto-computed. e.g. 'Winter 2026/27'",
+    )
+
+    has_option_to_buy: bool = False
+    option_to_buy_fee: float = Field(default=0.0, ge=0)
+    option_to_buy_year: int = Field(default=0, ge=0)
 
 
 # ─── Simulation document ──────────────────────────────────────────────────────

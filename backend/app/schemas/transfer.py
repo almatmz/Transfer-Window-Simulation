@@ -7,9 +7,7 @@ from app.models.transfer import (
 
 
 class SimulationCreateRequest(BaseModel):
-    club_api_football_id: int = Field(
-        ..., description="e.g. 33 = Man Utd, 541 = Real Madrid"
-    )
+    club_api_football_id: int = Field(..., description="e.g. 33 = Man Utd, 541 = Real Madrid")
     simulation_name: str = Field(..., min_length=2, max_length=100)
     window_type: WindowType = Field(default=WindowType.SUMMER)
     season: str = Field(default="2025/26", description='e.g. "2025/26" or "2026/27"')
@@ -23,6 +21,7 @@ class UpdateSimulationMetaRequest(BaseModel):
     is_public: Optional[bool] = None
 
 
+# Add requests — pass straight through to the entry models
 class AddBuyRequest(BuyEntry):
     pass
 
@@ -36,9 +35,9 @@ class AddLoanOutRequest(LoanOutEntry):
     pass
 
 
+# Update requests — all fields optional (only sent fields are changed)
 
 class UpdateBuyRequest(BaseModel):
-    """Update any field of an existing buy. Only sent fields are changed."""
     player_name: Optional[str] = None
     position: Optional[str] = None
     age: Optional[int] = Field(default=None, ge=15, le=45)
@@ -50,7 +49,6 @@ class UpdateBuyRequest(BaseModel):
 
 
 class UpdateSellRequest(BaseModel):
-    """Update any field of an existing sell."""
     player_name: Optional[str] = None
     position: Optional[str] = None
     transfer_fee: Optional[float] = Field(default=None, ge=0)
@@ -60,35 +58,35 @@ class UpdateSellRequest(BaseModel):
 
 
 class UpdateLoanInRequest(BaseModel):
-    """Update any field of an existing loan-in."""
     player_name: Optional[str] = None
     position: Optional[str] = None
     age: Optional[int] = Field(default=None, ge=15, le=45)
+    nationality: Optional[str] = None
     api_football_player_id: Optional[int] = None
     loan_fee: Optional[float] = Field(default=None, ge=0)
     annual_salary: Optional[float] = Field(default=None, gt=0)
     wage_contribution_pct: Optional[float] = Field(default=None, ge=0, le=100)
-    contract_length_years: Optional[int] = Field(default=None, ge=1, le=3)
+    loan_duration_months: Optional[int] = Field(default=None, ge=1, le=36)
     has_option_to_buy: Optional[bool] = None
     option_to_buy_fee: Optional[float] = Field(default=None, ge=0)
     option_to_buy_year: Optional[int] = Field(default=None, ge=0)
 
 
 class UpdateLoanOutRequest(BaseModel):
-    """Update any field of an existing loan-out."""
     player_name: Optional[str] = None
     position: Optional[str] = None
+    nationality: Optional[str] = None
     api_football_player_id: Optional[int] = None
     loan_fee_received: Optional[float] = Field(default=None, ge=0)
     annual_salary: Optional[float] = Field(default=None, ge=0)
     wage_contribution_pct: Optional[float] = Field(default=None, ge=0, le=100)
-    contract_length_years: Optional[int] = Field(default=None, ge=1, le=3)
-    has_option_to_sell: Optional[bool] = None
-    option_to_sell_fee: Optional[float] = Field(default=None, ge=0)
-    option_to_sell_year: Optional[int] = Field(default=None, ge=0)
+    loan_duration_months: Optional[int] = Field(default=None, ge=1, le=36)
+    has_option_to_buy: Optional[bool] = None
+    option_to_buy_fee: Optional[float] = Field(default=None, ge=0)
+    option_to_buy_year: Optional[int] = Field(default=None, ge=0)
 
 
-# Responses 
+# Responses
 
 class SimulationResponse(BaseModel):
     id: str

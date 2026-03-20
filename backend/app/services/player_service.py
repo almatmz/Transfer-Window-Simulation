@@ -23,7 +23,7 @@ from app.utils.amortization import (
 _NOW_YEAR = 2026
 
 
-#Override loader helpers 
+# Override loader helpers 
 
 async def _get_admin_override(player_id: str) -> Optional[PlayerOverride]:
     """Returns the single Admin override for a player, or None."""
@@ -42,7 +42,7 @@ async def _get_sd_override(player_id: str, user_id: str) -> Optional[PlayerOverr
     )
 
 
-# Merge helper 
+#  Merge helper
 
 def _merge(player: Player, admin_ov: Optional[PlayerOverride], sd_ov: Optional[PlayerOverride]) -> dict:
     """
@@ -112,8 +112,15 @@ def _override_fields() -> list[str]:
         "photo_url", "transfer_value", "transfer_value_currency",
         "contract_signing_date", "contract_expiry_date", "contract_expiry_year",
         "contract_length_years", "acquisition_fee", "acquisition_year",
+        # Loan IN
         "is_on_loan", "loan_from_club", "loan_from_club_id", "loan_start_date",
-        "loan_end_date", "loan_fee", "loan_wage_contribution_pct",
+        "loan_end_date", "loan_fee", "loan_option_to_buy", "loan_option_to_buy_fee",
+        "loan_wage_contribution_pct",
+        # Loan OUT
+        "loaned_out", "loaned_out_to_club", "loaned_out_to_club_id",
+        "loaned_out_start_date", "loaned_out_end_date", "loaned_out_fee",
+        "loaned_out_option_to_buy", "loaned_out_option_to_buy_fee",
+        "loaned_out_wage_contribution_pct",
         "transfermarkt_url",
     ]
 
@@ -123,7 +130,7 @@ def _apply_field(data: dict, field: str, val) -> None:
     data[field] = val
 
 
-#Serializers 
+# ─────────────────────────── Serializers ────────────────────────────────────
 
 def _to_public(player: Player, merged: dict) -> PlayerPublicResponse:
     """Build the public response from a merged data dict."""
@@ -212,6 +219,7 @@ def _to_sd(
     )
 
 
+# ─────────────────────────── Public API ─────────────────────────────────────
 
 async def _find_player(api_football_id: int) -> Player:
     player = await Player.find_one(Player.api_football_id == api_football_id)
@@ -295,7 +303,7 @@ async def list_squad(
     return result
 
 
-# Override CRUD 
+# ─────────────────────────── Override CRUD ──────────────────────────────────
 
 async def set_player_override(
     api_football_id: int,
@@ -308,6 +316,21 @@ async def set_player_override(
     Admin   → set_by_role = "admin" → one per player, last write wins
     SD      → set_by_role = "sport_director" → one per (player, user), private
     """
+    # A player cannot be on loan IN and loaned OUT simultaneously.
+    # Check both the incoming data AND the existing override (partial updates).
+    loan_in_requested  = data.is_on_loan is True
+    loan_out_requested = data.loaned_out is True
+
+    if loan_in_requested and loan_out_requested:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A player cannot be on loan IN and loaned OUT at the same time. "
+                "Set either is_on_loan=true (receiving a loan) "
+                "or loaned_out=true (sending on loan), not both."
+            ),
+        )
+
     player = await _find_player(api_football_id)
     player_id = str(player.id)
     now = datetime.utcnow()
@@ -319,6 +342,21 @@ async def set_player_override(
         existing = await _get_admin_override(player_id)
     else:
         existing = await _get_sd_override(player_id, str(setter.id))
+
+    # Cross-check new values against existing override to catch partial update conflicts
+    # e.g. existing has loaned_out=true, new request sets is_on_loan=true without clearing loaned_out
+    if existing:
+        effective_loan_in  = data.is_on_loan  if data.is_on_loan  is not None else existing.is_on_loan
+        effective_loan_out = data.loaned_out   if data.loaned_out   is not None else existing.loaned_out
+        if effective_loan_in and effective_loan_out:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Conflict with existing override: player would end up both on loan IN "
+                    "and loaned OUT. Clear one before setting the other "
+                    "(send is_on_loan=false or loaned_out=false explicitly)."
+                ),
+            )
 
     override_data = data.model_dump(exclude_unset=False)
     override_data["updated_at"] = now

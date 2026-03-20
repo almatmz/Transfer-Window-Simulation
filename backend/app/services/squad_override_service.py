@@ -7,7 +7,6 @@ from app.models.club import Club
 from app.models.player import Player
 from app.models.player_override import PlayerOverride
 from app.models.squad_override import SquadOverride, OverrideAction
-from app.models.loan_deal import LoanDeal
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,6 @@ def _player_to_dict(
     admin_ov: Optional[PlayerOverride] = None,
     sd_ov: Optional[PlayerOverride] = None,
     loan_badge: Optional[str] = None,   # "loan_in" | "loan_out" | None
-    loan_deal: Optional[LoanDeal] = None,
 ) -> dict:
     """
     Serialize a Player to dict applying PlayerOverride priority (SD > Admin > DB).
@@ -66,21 +64,6 @@ def _player_to_dict(
         "squad_loan_status": loan_badge,  # None | "loan_in" | "loan_out"
     }
 
-    # Inject LoanDeal details when showing as loan_in in receiving club
-    if loan_badge == "loan_in" and loan_deal:
-        data["loan_from_club"] = loan_deal.counterpart_club_name
-        data["loan_end_date"] = (
-            loan_deal.loan_end_date.isoformat() if loan_deal.loan_end_date else None
-        )
-        data["loan_wage_contribution_pct"] = loan_deal.wage_contribution_pct
-        data["loan_option_to_buy"] = loan_deal.has_option_to_buy
-        data["loan_option_to_buy_fee"] = loan_deal.option_to_buy_fee
-        data["estimated_annual_salary"] = (
-            loan_deal.annual_salary * loan_deal.wage_contribution_pct / 100
-        )
-        data["salary_source"] = f"loan_deal_{loan_deal.set_by_role}"
-        data["is_on_loan"] = True
-
     # Apply admin override
     if admin_ov:
         _apply_override(data, admin_ov, "admin_override")
@@ -104,10 +87,23 @@ def _apply_override(data: dict, ov: PlayerOverride, source_label: str) -> None:
         "transfer_value_currency": "transfer_value_currency",
         "contract_expiry_year": "contract_expiry_year",
         "contract_length_years": "contract_length_years",
+        "acquisition_fee": "acquisition_fee",
+        "transfermarkt_url": "transfermarkt_url",
+        # Loan IN
         "is_on_loan": "is_on_loan",
         "loan_from_club": "loan_from_club",
-        "transfermarkt_url": "transfermarkt_url",
-        "acquisition_fee": "acquisition_fee",
+        "loan_from_club_id": "loan_from_club_id",
+        "loan_option_to_buy": "loan_option_to_buy",
+        "loan_option_to_buy_fee": "loan_option_to_buy_fee",
+        "loan_wage_contribution_pct": "loan_wage_contribution_pct",
+        # Loan OUT
+        "loaned_out": "loaned_out",
+        "loaned_out_to_club": "loaned_out_to_club",
+        "loaned_out_to_club_id": "loaned_out_to_club_id",
+        "loaned_out_fee": "loaned_out_fee",
+        "loaned_out_option_to_buy": "loaned_out_option_to_buy",
+        "loaned_out_option_to_buy_fee": "loaned_out_option_to_buy_fee",
+        "loaned_out_wage_contribution_pct": "loaned_out_wage_contribution_pct",
     }
     changed = False
     for ov_field, data_field in field_map.items():
@@ -115,7 +111,11 @@ def _apply_override(data: dict, ov: PlayerOverride, source_label: str) -> None:
         if val is not None:
             data[data_field] = val
             changed = True
-    for date_field in ("date_of_birth", "contract_expiry_date", "contract_signing_date", "loan_end_date"):
+    for date_field in (
+        "date_of_birth", "contract_expiry_date", "contract_signing_date",
+        "loan_start_date", "loan_end_date",
+        "loaned_out_start_date", "loaned_out_end_date",
+    ):
         val = getattr(ov, date_field, None)
         if val is not None:
             data[date_field] = val.isoformat()
@@ -174,9 +174,8 @@ async def get_effective_squad(
     Returns effective squad for a club/season/viewer.
 
     LOAN INJECTION:
-      - Loads all active LoanDeal "in" deals for this club
-      - Fetches those players (who belong to other clubs) and injects them
-        into this club's squad with squad_loan_status="loan_in"
+      - Finds players with Player.loaned_out_to_club_id == this club
+      - Injects them with squad_loan_status="loan_in"
       - Players loaned OUT are kept in squad with squad_loan_status="loan_out"
     """
     is_sd = viewer_role in ("admin", "sport_director") and viewer_id is not None
@@ -192,7 +191,7 @@ async def get_effective_squad(
         }
     club_id_str = str(club_doc.id)
 
-    # 2. Load own players 
+    #  2. Load own players
     own_players = await Player.find(
         Player.club_id == club_id_str,
         Player.is_sold == False,  # noqa: E712
@@ -212,46 +211,11 @@ async def get_effective_squad(
         if str(p.id) not in own_player_ids_set
     ]
 
-    # SOURCE B: LoanDeal records with direction="in" for this club
-    # (SD private deals or deals not yet reflected on the Player document)
-    loan_in_query = {
-        "club_api_football_id": club_api_football_id,
-        "loan_direction": "in",
-        "is_active": True,
-        "option_exercised": False,
-    }
-    if not is_sd:
-        loan_in_query["set_by_role"] = "admin"
+    # Loan status is determined solely from Player.loaned_out_to_club_id
+    # (set when a loan is confirmed via PlayerOverride or admin action)
+    loaned_in_players: list[Player] = players_loaned_in_directly
 
-    all_loan_in_deals = await LoanDeal.find(loan_in_query).to_list()
-
-    # Deduplicate LoanDeals: SD deal wins over admin for same player
-    loan_in_by_player: dict[str, LoanDeal] = {}
-    for deal in all_loan_in_deals:
-        pid = deal.player_id
-        existing_deal = loan_in_by_player.get(pid)
-        if existing_deal is None:
-            loan_in_by_player[pid] = deal
-        elif deal.set_by_role == "sport_director" and deal.set_by_user_id == viewer_id:
-            loan_in_by_player[pid] = deal
-
-    # Fetch player docs for LoanDeal-based loans not already captured above
-    direct_ids = {str(p.id) for p in players_loaned_in_directly}
-    deal_only_pids = [
-        pid for pid in loan_in_by_player
-        if pid not in direct_ids and pid not in own_player_ids_set
-    ]
-    deal_only_players: list[Player] = []
-    if deal_only_pids:
-        import bson
-        deal_only_players = await Player.find(
-            {"_id": {"$in": [bson.ObjectId(pid) for pid in deal_only_pids]}}
-        ).to_list()
-
-    # Merge both sources — direct loans + deal-only loans
-    loaned_in_players: list[Player] = players_loaned_in_directly + deal_only_players
-
-    # 4. Bulk load PlayerOverrides for ALL players (own + loaned-in)
+    # ── 4. Bulk load PlayerOverrides for ALL players (own + loaned-in) ───────
     all_player_ids = [str(p.id) for p in own_players + loaned_in_players]
 
     admin_ovs_raw = await PlayerOverride.find(
@@ -289,37 +253,26 @@ async def get_effective_squad(
         else:
             active.append(merged)
 
-    # 6. Inject loaned-in players 
+    #  6. Inject loaned-in players 
     for p in loaned_in_players:
         pid = str(p.id)
         admin_ov = admin_ov_map.get(pid)
         sd_ov = sd_ov_map.get(pid) if is_sd else None
-        deal = loan_in_by_player.get(pid)  # may be None for direct/field-based loans
+        merged = _player_to_dict(p, admin_ov, sd_ov, loan_badge="loan_in")
 
-        merged = _player_to_dict(
-            p, admin_ov, sd_ov,
-            loan_badge="loan_in",
-            loan_deal=deal,
-        )
+        # Inject loan info from player's loaned_out fields
+        merged["is_on_loan"] = True
+        merged["loan_from_club"] = p.loan_from_club or getattr(p, "loaned_out_to_club", None)
+        lo_end = getattr(p, "loaned_out_end_date", None)
+        merged["loan_end_date"] = lo_end.isoformat() if lo_end else None
+        pct = getattr(p, "loaned_out_wage_contribution_pct", 100.0)
+        merged["loan_wage_contribution_pct"] = pct
+        merged["loan_option_to_buy"] = getattr(p, "loaned_out_option_to_buy", False)
+        merged["loan_option_to_buy_fee"] = getattr(p, "loaned_out_option_to_buy_fee", None)
+        merged["estimated_annual_salary"] = p.estimated_annual_salary * pct / 100
+        merged["salary_source"] = "loaned_in"
 
-        # For direct loans (no LoanDeal), inject loan info from player fields
-        if deal is None:
-            merged["is_on_loan"] = True
-            merged["loan_from_club"] = p.loan_from_club or getattr(p, "loaned_out_to_club", None)
-            lo_end = getattr(p, "loaned_out_end_date", None)
-            merged["loan_end_date"] = lo_end.isoformat() if lo_end else None
-            merged["loan_wage_contribution_pct"] = getattr(p, "loaned_out_wage_contribution_pct", 100.0)
-            merged["loan_option_to_buy"] = getattr(p, "loaned_out_option_to_buy", False)
-            merged["loan_option_to_buy_fee"] = getattr(p, "loaned_out_option_to_buy_fee", None)
-            lo_salary_pct = getattr(p, "loaned_out_wage_contribution_pct", 100.0)
-            merged["estimated_annual_salary"] = p.estimated_annual_salary * lo_salary_pct / 100
-            merged["salary_source"] = "loaned_in_player_fields"
-
-        # Use loan end date for expiry check (not contract_expiry_year)
-        lo_end_date = (
-            deal.loan_end_date if deal and deal.loan_end_date
-            else getattr(p, "loaned_out_end_date", None)
-        )
+        lo_end_date = getattr(p, "loaned_out_end_date", None)
         loan_end_year = lo_end_date.year if lo_end_date else 0
         if loan_end_year > 0 and loan_end_year < view_season:
             expired.append(merged)
