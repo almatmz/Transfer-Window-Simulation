@@ -33,7 +33,7 @@ export const CURRENT_SEASON =
     ? new Date().getFullYear()
     : new Date().getFullYear() - 1;
 
-// Token storage (memory + sessionStorage)
+//  Token storage (memory + sessionStorage)
 let _at: string | null = null;
 let _rt: string | null = null;
 let _refreshing: Promise<boolean> | null = null;
@@ -70,7 +70,7 @@ export const getRefreshToken = (): string | null => {
 };
 export const isAuthenticated = () => !!getAccessToken();
 
-// Core fetch with auto-refresh
+//  Core fetch with auto-refresh
 async function tryRefresh(): Promise<boolean> {
   if (_refreshing) return _refreshing;
   return (_refreshing = (async () => {
@@ -137,7 +137,7 @@ async function apiFetch<T>(
     throw new Error(msg);
   }
   const text = await res.text();
-  if (!text || text === "null") return {} as T;
+  if (!text || text === "null") return null as unknown as T;
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -145,7 +145,7 @@ async function apiFetch<T>(
   }
 }
 
-//  Auth
+// Auth
 export const authApi = {
   register: (b: {
     email: string;
@@ -182,7 +182,7 @@ export const searchApi = {
     ),
 };
 
-// Clubs
+// ─── Clubs ────────────────────────────────────────────────────
 export const clubsApi = {
   get: (id: number, season = CURRENT_SEASON) =>
     apiFetch<ClubResponse>(`/clubs/${id}?season=${season}`),
@@ -225,18 +225,18 @@ export const playersApi = {
       method: "POST",
       body: JSON.stringify({ notes }),
     }),
-  getContractExt: (id: number) =>
-    apiFetch<ContractExtensionResponse[]>(`/players/${id}/contract-extension`),
-  setContractExt: (id: number, b: ContractExtensionRequest) =>
+  getContractExtension: async (id: number) =>
+    apiFetch<any>(`/players/${id}/contract-extension`),
+  setContractExtension: (id: number, b: ContractExtensionRequest) =>
     apiFetch<ContractExtensionResponse>(`/players/${id}/contract-extension`, {
       method: "PUT",
       body: JSON.stringify(b),
     }),
-  deleteContractExt: (id: number) =>
+  deleteContractExtension: (id: number) =>
     apiFetch<void>(`/players/${id}/contract-extension`, { method: "DELETE" }),
 };
 
-// Squad Overrides
+//  Squad Overrides
 export const squadOverridesApi = {
   list: (clubId: number) =>
     apiFetch<SquadOverrideResponse[]>(`/squad-overrides/clubs/${clubId}`),
@@ -253,7 +253,7 @@ export const squadOverridesApi = {
     ),
 };
 
-// Simulations
+//  Simulations
 export const simulationsApi = {
   create: (b: SimulationCreateRequest) =>
     apiFetch<SimulationResponse>("/simulations/", {
@@ -327,7 +327,7 @@ export const simulationsApi = {
     }),
   /** Simulated squad — club squad with all simulation transfers applied */
   getSimulatedSquad: (simId: string) =>
-    apiFetch<SquadResponse>(`/simulations/simulations/${simId}/squad`),
+    apiFetch<SquadResponse>(`/simulations/${simId}/squad`),
 };
 
 //  FFP
@@ -338,7 +338,7 @@ export const ffpApi = {
     ),
 };
 
-//  Admin
+// Admin
 export const adminApi = {
   listUsers: () => apiFetch<UserResponse[]>("/admin/users"),
   updateUser: (

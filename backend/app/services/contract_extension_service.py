@@ -73,7 +73,7 @@ def _serialize(ext: ContractExtension, player_name: str) -> ContractExtensionRes
     )
 
 
-# ─────────────────────── CRUD ────────────────────────────────────────────────
+# CRUD 
 
 async def set_contract_extension(
     api_football_id: int,
@@ -145,38 +145,105 @@ async def get_contract_extension(
     api_football_id: int,
     viewer: User,
 ) -> dict:
+    """
+    Returns the player's current contract and all extensions visible to this viewer.
+
+    Response structure:
+      current   — the player's actual contract as it stands in the DB
+      effective — the contract terms that will be used in FFP (after applying
+                  the highest-priority extension: SD > Admin > User > none)
+      extensions — list of extensions visible to this viewer, each tagged with
+                   set_by_role so the frontend knows who set it
+    """
     player = await _find_player(api_football_id)
     player_id = str(player.id)
     role = _role(viewer)
+    viewer_id = str(viewer.id)
 
+    #  Load extensions visible to this viewer 
     admin_ext = await _get_admin_extension(player_id)
-
-    result = {
-        "player_api_football_id": api_football_id,
-        "player_name": player.name,
-        "current_contract_expiry_year": player.contract_expiry_year,
-        "current_annual_salary": player.estimated_annual_salary,
-        "admin_extension": _serialize(admin_ext, player.name) if admin_ext else None,
-        "sd_extension": None,
-        "user_extension": None,
-    }
+    my_ext: Optional[ContractExtension] = None
 
     if role == "admin":
-        # Admin sees all SD and user extensions
         all_others = await ContractExtension.find(
             ContractExtension.player_id == player_id,
             ContractExtension.set_by_role != "admin",
         ).to_list()
-        result["all_other_extensions"] = [_serialize(e, player.name) for e in all_others]
     elif role == "sport_director":
-        sd_ext = await _get_sd_extension(player_id, str(viewer.id))
-        result["sd_extension"] = _serialize(sd_ext, player.name) if sd_ext else None
+        my_ext = await _get_sd_extension(player_id, viewer_id)
+        all_others = []
     else:
-        # Regular user — sees admin extension (read-only) + their own proposal
-        user_ext = await _get_user_extension(player_id, str(viewer.id))
-        result["user_extension"] = _serialize(user_ext, player.name) if user_ext else None
+        my_ext = await _get_user_extension(player_id, viewer_id)
+        all_others = []
 
-    return result
+    #  Effective contract = highest-priority extension applied 
+    effective_ext = await get_effective_extension(player_id, role == "sport_director", viewer_id, role)
+
+    def _effective_value(ext_val, player_val):
+        return ext_val if ext_val is not None else player_val
+
+    effective_expiry_year = _effective_value(
+        effective_ext.new_contract_expiry_year if effective_ext else None,
+        player.contract_expiry_year,
+    )
+    effective_salary = _effective_value(
+        effective_ext.new_annual_salary if effective_ext else None,
+        player.estimated_annual_salary,
+    )
+    effective_length = _effective_value(
+        effective_ext.new_contract_length_years if effective_ext else None,
+        player.contract_length_years,
+    )
+    effective_bonus_amort = effective_ext.signing_bonus_amortization if effective_ext else 0.0
+
+    #  Build extensions list (only non-null ones) 
+    extensions = []
+    if admin_ext:
+        ext_dict = _serialize(admin_ext, player.name).model_dump()
+        ext_dict["visibility"] = "everyone"
+        extensions.append(ext_dict)
+
+    if role == "admin":
+        for e in all_others:
+            ext_dict = _serialize(e, player.name).model_dump()
+            ext_dict["visibility"] = f"only_{e.set_by_user_id}"
+            extensions.append(ext_dict)
+    elif my_ext:
+        ext_dict = _serialize(my_ext, player.name).model_dump()
+        ext_dict["visibility"] = "only_you"
+        extensions.append(ext_dict)
+
+    has_any_extension = bool(extensions)
+
+    return {
+        "player_api_football_id": api_football_id,
+        "player_name": player.name,
+        "player_position": player.position,
+        "player_age": player.age,
+
+        # The raw DB contract — what's actually signed
+        "current_contract": {
+            "expiry_year": player.contract_expiry_year,
+            "length_years": player.contract_length_years,
+            "annual_salary": player.estimated_annual_salary,
+            "signing_date": player.contract_signing_date.isoformat() if player.contract_signing_date else None,
+            "salary_source": player.salary_source,
+        },
+
+        # What FFP calculations will use for this viewer (extension applied if any)
+        "effective_contract": {
+            "expiry_year": effective_expiry_year,
+            "length_years": effective_length,
+            "annual_salary": effective_salary,
+            "signing_bonus_annual_amortization": effective_bonus_amort,
+            "extension_applied": has_any_extension and effective_ext is not None,
+            "extension_set_by": effective_ext.set_by_role if effective_ext else None,
+        },
+
+        # All extensions visible to this viewer (empty list = no extensions set)
+        "extensions": extensions,
+        "has_extensions": has_any_extension,
+    }
 
 
 async def delete_contract_extension(
@@ -206,7 +273,7 @@ async def delete_contract_extension(
     }
 
 
-# ─────────────────────── FFP helper ─────────────────────────────────────────
+#  FFP helper 
 
 async def get_effective_extension(
     player_id: str,
